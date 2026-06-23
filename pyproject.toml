@@ -1,0 +1,19 @@
+[project]
+name = "crocodash-mcp"
+version = "0.1.0"
+description = "FastMCP server for CrocoDash regional MOM6 ocean model configuration"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0",
+]
+
+[project.scripts]
+crocodash-mcp = "server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tools"]
+include = ["resources.py", "server.py"]

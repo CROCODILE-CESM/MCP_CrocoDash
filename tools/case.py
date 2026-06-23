@@ -1,0 +1,351 @@
+import json
+import importlib.util
+from pathlib import Path
+from typing import Optional
+
+from CrocoDash.grid import Grid
+from CrocoDash.topo import Topo
+from CrocoDash.vgrid import VGrid
+from CrocoDash.case import Case
+from mom6_forge.git_utils import get_domain_dir
+
+# In-memory cache: case_dir (str) → Case object.
+# This cache is valid for the lifetime of the server process.
+# If the server restarts between create_case and configure_forcings,
+# re-run create_case with override=True to rebuild.
+_case_registry: dict[str, Case] = {}
+
+
+def _load_grid_params(case_dir: Path) -> dict:
+    params_path = case_dir / "mcp_grid_params.json"
+    if not params_path.exists():
+        raise FileNotFoundError(
+            f"Grid params not found at {params_path}. Run create_grid first."
+        )
+    return json.loads(params_path.read_text())
+
+
+def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGrid]:
+    grid = Grid(
+        lenx=params["lenx"],
+        leny=params["leny"],
+        resolution=params["resolution"],
+        xstart=params["lon_min"],
+        ystart=params["lat_min"],
+        name=params["grid_name"],
+    )
+
+    topo_library_dir = params.get("topo_library_dir", str(case_dir / "TopoLibrary"))
+    domain_dir = get_domain_dir(grid, base_dir=topo_library_dir)
+    topo = Topo.from_version_control(domain_dir)
+
+    vgrid_type = params["vgrid_type"]
+    if vgrid_type == "uniform":
+        vgrid = VGrid.uniform(
+            nk=params["nk"], depth=params["depth"], name=params["grid_name"]
+        )
+    else:
+        vgrid = VGrid.hyperbolic(
+            nk=params["nk"],
+            depth=params["depth"],
+            ratio=params["ratio"],
+            name=params["grid_name"],
+        )
+
+    return grid, topo, vgrid
+
+
+def create_case(
+    case_dir: str,
+    cesmroot: str,
+    caseroot: str,
+    compset: str,
+    machine: str,
+    project: Optional[str] = None,
+    atm_grid_name: str = "TL319",
+    rof_grid_name: Optional[str] = None,
+    ninst: int = 1,
+    ntasks_ocn: Optional[int] = None,
+    job_queue: Optional[str] = None,
+    job_wallclock_time: Optional[str] = None,
+    override: bool = False,
+) -> dict:
+    """
+    Create a CESM case for a regional MOM6 experiment.
+
+    Reads the grid configuration from {case_dir}/mcp_grid_params.json (written by
+    create_grid) and calls Case.__init__(), which writes grid input files to {case_dir}
+    and creates the CESM case directory at caseroot.
+
+    Parameters
+    ----------
+    case_dir : str
+        Working directory for this case (the CrocoDash inputdir).
+    cesmroot : str
+        Path to the CESM source root directory.
+    caseroot : str
+        Path where the CESM case directory will be created.
+    compset : str
+        CESM compset alias (e.g. "G_JRA") or long name.
+    machine : str
+        CESM machine name (e.g. "derecho").
+    project : str, optional
+        HPC project/account code (required on most machines).
+    atm_grid_name : str
+        Atmosphere grid name (default "TL319").
+    rof_grid_name : str, optional
+        Runoff grid name; required when compset includes a runoff component.
+    ninst : int
+        Number of ensemble instances (default 1).
+    ntasks_ocn : int, optional
+        MPI tasks for the ocean component.
+    job_queue : str, optional
+        Scheduler queue name (e.g. "main", "regular").
+    job_wallclock_time : str, optional
+        Wall-clock time limit in hh:mm:ss format.
+    override : bool
+        If True, delete and recreate existing caseroot and input directories.
+    """
+    case_dir_path = Path(case_dir)
+    params = _load_grid_params(case_dir_path)
+    grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)
+
+    case = Case(
+        cesmroot=cesmroot,
+        caseroot=caseroot,
+        inputdir=str(case_dir_path),
+        compset=compset,
+        ocn_grid=grid,
+        ocn_topo=topo,
+        ocn_vgrid=vgrid,
+        atm_grid_name=atm_grid_name,
+        rof_grid_name=rof_grid_name,
+        ninst=ninst,
+        machine=machine,
+        project=project,
+        override=override,
+        ntasks_ocn=ntasks_ocn,
+        job_queue=job_queue,
+        job_wallclock_time=job_wallclock_time,
+    )
+
+    _case_registry[str(case_dir_path)] = case
+
+    case_params = {
+        "cesmroot": cesmroot,
+        "caseroot": caseroot,
+        "inputdir": str(case_dir_path),
+        "compset": compset,
+        "machine": machine,
+        "project": project,
+        "atm_grid_name": atm_grid_name,
+        "rof_grid_name": rof_grid_name,
+        "ninst": ninst,
+        "ntasks_ocn": ntasks_ocn,
+        "job_queue": job_queue,
+        "job_wallclock_time": job_wallclock_time,
+        "override": override,
+    }
+    (case_dir_path / "mcp_case_params.json").write_text(json.dumps(case_params, indent=2))
+
+    return {
+        "status": "ok",
+        "caseroot": caseroot,
+        "inputdir": str(case_dir_path),
+        "compset": compset,
+        "machine": machine,
+    }
+
+
+def configure_forcings(
+    case_dir: str,
+    date_range: list[str],
+    boundaries: list[str] = ["south", "north", "west", "east"],
+    product_name: str = "GLORYS",
+    function_name: str = "get_glorys_data_script_for_cli",
+    tpxo_elevation_filepath: Optional[str] = None,
+    tpxo_velocity_filepath: Optional[str] = None,
+    tidal_constituents: Optional[list[str]] = None,
+    chl_processed_filepath: Optional[str] = None,
+    marbl_ic_filepath: Optional[str] = None,
+    global_river_nutrients_filepath: Optional[str] = None,
+) -> dict:
+    """
+    Configure forcings for a regional MOM6 case.
+
+    Calls Case.configure_forcings(), which copies the extraction workflow into
+    {case_dir}/extract_forcings/ and writes config.json there. Optional forcing
+    configurators (tides, BGC, chlorophyll, runoff) are activated automatically
+    when their required arguments are supplied.
+
+    Requires create_case to have been called in the current server session.
+    If the server restarted since create_case ran, re-run create_case first.
+
+    Parameters
+    ----------
+    case_dir : str
+        Working directory (inputdir) for this case.
+    date_range : list of str
+        Two-element list of ISO dates: ["YYYY-MM-DD", "YYYY-MM-DD"].
+    boundaries : list of str
+        Open boundaries to process (default: all four sides).
+    product_name : str
+        Name of the forcing data product (e.g. "GLORYS").
+    function_name : str
+        Access method on the product (e.g. "get_glorys_data_script_for_cli").
+    tpxo_elevation_filepath : str, optional
+        Path to TPXO elevation NetCDF — activates tidal forcing.
+    tpxo_velocity_filepath : str, optional
+        Path to TPXO velocity NetCDF — activates tidal forcing.
+    tidal_constituents : list of str, optional
+        Tidal constituents to include (e.g. ["M2", "S2"]).
+    chl_processed_filepath : str, optional
+        Path to processed chlorophyll NetCDF — activates Chl configurator.
+    marbl_ic_filepath : str, optional
+        Path to MARBL initial conditions NetCDF — activates BGC IC configurator.
+    global_river_nutrients_filepath : str, optional
+        Path to global river nutrients NetCDF — activates BGC river nutrients.
+    """
+    case_dir_key = str(Path(case_dir))
+    if case_dir_key not in _case_registry:
+        raise RuntimeError(
+            f"No active Case found for {case_dir!r}. "
+            "The MCP server may have restarted. Re-run create_case (with override=True) "
+            "to rebuild the in-memory Case object."
+        )
+
+    case = _case_registry[case_dir_key]
+
+    kwargs: dict = {}
+    if tpxo_elevation_filepath is not None:
+        kwargs["tpxo_elevation_filepath"] = tpxo_elevation_filepath
+    if tpxo_velocity_filepath is not None:
+        kwargs["tpxo_velocity_filepath"] = tpxo_velocity_filepath
+    if tidal_constituents is not None:
+        kwargs["tidal_constituents"] = tidal_constituents
+    if chl_processed_filepath is not None:
+        kwargs["chl_processed_filepath"] = chl_processed_filepath
+    if marbl_ic_filepath is not None:
+        kwargs["marbl_ic_filepath"] = marbl_ic_filepath
+    if global_river_nutrients_filepath is not None:
+        kwargs["global_river_nutrients_filepath"] = global_river_nutrients_filepath
+
+    case.configure_forcings(
+        date_range=date_range,
+        boundaries=boundaries,
+        product_name=product_name,
+        function_name=function_name,
+        **kwargs,
+    )
+
+    return {
+        "status": "ok",
+        "date_range": date_range,
+        "boundaries": boundaries,
+        "product_name": product_name,
+        "active_configurators": list(case.fcr.get_active_configurators()),
+        "config_written_to": str(Path(case_dir) / "extract_forcings" / "config.json"),
+    }
+
+
+def process_forcings(
+    case_dir: str,
+    process_initial_condition: bool = True,
+    process_velocity_tracers: bool = True,
+    process_bgc: bool = True,
+    process_tides: bool = True,
+    process_chl: bool = True,
+    process_runoff: bool = True,
+    process_bgc_river_nutrients: bool = True,
+) -> dict:
+    """
+    Process boundary conditions, initial conditions, and other forcings.
+
+    Reads config.json written by configure_forcings and imports the driver
+    copied into {case_dir}/extract_forcings/. Fully stateless — does not
+    require the Case object to be in memory.
+
+    Parameters
+    ----------
+    case_dir : str
+        Working directory (inputdir) for this case.
+    process_initial_condition : bool
+        Whether to process the initial condition file (default True).
+    process_velocity_tracers : bool
+        Whether to process velocity/tracer boundary conditions (default True).
+    process_bgc : bool
+        Whether to run BGC iron forcing and BGC IC steps if configured (default True).
+    process_tides : bool
+        Whether to run tidal forcing if configured (default True).
+    process_chl : bool
+        Whether to run chlorophyll processing if configured (default True).
+    process_runoff : bool
+        Whether to run runoff mapping if configured (default True).
+    process_bgc_river_nutrients : bool
+        Whether to run BGC river nutrients if configured (default True).
+    """
+    case_dir_path = Path(case_dir)
+    driver_path = case_dir_path / "extract_forcings" / "driver.py"
+    config_path = case_dir_path / "extract_forcings" / "config.json"
+
+    if not driver_path.exists():
+        raise FileNotFoundError(
+            f"Driver not found at {driver_path}. Run configure_forcings first."
+        )
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config not found at {config_path}. Run configure_forcings first."
+        )
+
+    with open(config_path) as f:
+        config = json.load(f)
+
+    # Import the driver using its own file path so CONFIG_PATH resolves correctly.
+    module_name = f"crocodash_driver_{case_dir_path.name}"
+    spec = importlib.util.spec_from_file_location(module_name, driver_path)
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+
+    ran: list[str] = []
+
+    if process_initial_condition or process_velocity_tracers:
+        driver.process_conditions(
+            get_dataset_piecewise=True,
+            regrid_dataset_piecewise=True,
+            merge_piecewise_dataset=True,
+            run_initial_condition=process_initial_condition,
+            run_boundary_conditions=process_velocity_tracers,
+        )
+        ran.append("conditions")
+
+    if "bgcironforcing" in config and process_bgc:
+        driver.process_bgcironforcing()
+        ran.append("bgc_iron_forcing")
+
+    if "bgcic" in config and process_bgc:
+        driver.process_bgcic()
+        ran.append("bgc_ic")
+
+    if "tides" in config and process_tides:
+        driver.process_tides()
+        ran.append("tides")
+
+    if "chl" in config and process_chl:
+        driver.process_chl()
+        ran.append("chl")
+
+    if "runoff" in config and process_runoff:
+        driver.process_runoff()
+        ran.append("runoff")
+
+    if "bgcrivernutrients" in config and process_bgc_river_nutrients:
+        driver.process_bgcrivernutrients()
+        ran.append("bgc_river_nutrients")
+
+    return {"status": "ok", "processed": ran}
+
+
+def register(mcp):
+    mcp.tool()(create_case)
+    mcp.tool()(configure_forcings)
+    mcp.tool()(process_forcings)
