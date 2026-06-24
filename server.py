@@ -1,6 +1,16 @@
+import os
+from pathlib import Path
+
+# ESMF is bundled inside the CrocoDash conda environment.
+# Must be set before any xesmf/esmpy import (which happens in tools/).
+_conda_prefix = Path(os.__file__).parent.parent.parent  # lib/pythonX.Y -> prefix
+_esmf_mk = _conda_prefix / "lib" / "esmf.mk"
+if _esmf_mk.exists():
+    os.environ["ESMFMKFILE"] = str(_esmf_mk)
+
 from fastmcp import FastMCP
 
-from tools import discovery, grid, case, status
+from tools import discovery, grid, case, status, shareable
 from resources import register_resources
 
 mcp = FastMCP(
@@ -12,6 +22,18 @@ mcp = FastMCP(
         "  2. create_case   — create the CESM case (writes input files, runs ./create_newcase)\n"
         "  3. configure_forcings — set date range, product, boundaries, optional tides/BGC/chl\n"
         "  4. process_forcings  — download/regrid/merge boundary and initial conditions\n\n"
+        "Notes:\n"
+        "  - process_forcings can take minutes to tens of minutes (data download + regrid).\n"
+        "    Pass background=True to run it as a detached subprocess; poll get_case_status\n"
+        "    to track progress via the forcings_processing field.\n"
+        "  - On Derecho, configure_forcings defaults function_name to\n"
+        "    'get_glorys_data_from_rda' (NCAR local archive, much faster than\n"
+        "    Copernicus CLI). Override explicitly if needed.\n"
+        "  - With function_name='get_glorys_data_script_for_cli' (non-Derecho), configure_forcings\n"
+        "    writes a shell script but does NOT download data. You must run that script manually\n"
+        "    before calling process_forcings, or process_forcings will fail with a missing-file error.\n"
+        "  - create_case with override=True wipes the inputdir; grid params are automatically\n"
+        "    re-saved by create_case, but always run create_grid before create_case.\n\n"
         "Discovery tools: list_products, list_forcing_configs\n"
         "Introspection: get_case_status, preview_config\n"
         "Validation: validate_domain\n\n"
@@ -27,6 +49,7 @@ discovery.register(mcp)
 grid.register(mcp)
 case.register(mcp)
 status.register(mcp)
+shareable.register(mcp)
 register_resources(mcp)
 
 

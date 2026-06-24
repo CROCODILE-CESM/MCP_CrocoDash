@@ -76,6 +76,14 @@ def get_case_status(case_dir: str) -> dict:
             status["steps"]["forcings_processed"] = True
             status["output_files"] = sorted(f.name for f in ic_files + obc_files)
 
+    # Background process_forcings job status (if process_forcings was run with background=True)
+    bg_status_file = case_dir_path / "extract_forcings" / "process_forcings_status.json"
+    if bg_status_file.exists():
+        bg = json.loads(bg_status_file.read_text())
+        status["forcings_processing"] = bg
+        if bg.get("status") == "done" and not status["steps"]["forcings_processed"]:
+            status["steps"]["forcings_processed"] = True
+
     return status
 
 

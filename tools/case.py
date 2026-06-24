@@ -1,7 +1,18 @@
 import json
 import importlib.util
+import os
+import socket
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
+
+
+def _is_derecho() -> bool:
+    return (
+        os.environ.get("NCAR_HOST", "") == "derecho"
+        or "derecho" in socket.gethostname().lower()
+    )
 
 from CrocoDash.grid import Grid
 from CrocoDash.topo import Topo
@@ -131,6 +142,9 @@ def create_case(
 
     _case_registry[str(case_dir_path)] = case
 
+    # Re-save grid params — Case.__init__ with override=True wipes the inputdir.
+    (case_dir_path / "mcp_grid_params.json").write_text(json.dumps(params, indent=2))
+
     case_params = {
         "cesmroot": cesmroot,
         "caseroot": caseroot,
@@ -162,7 +176,7 @@ def configure_forcings(
     date_range: list[str],
     boundaries: list[str] = ["south", "north", "west", "east"],
     product_name: str = "GLORYS",
-    function_name: str = "get_glorys_data_script_for_cli",
+    function_name: Optional[str] = None,
     tpxo_elevation_filepath: Optional[str] = None,
     tpxo_velocity_filepath: Optional[str] = None,
     tidal_constituents: Optional[list[str]] = None,
@@ -191,8 +205,9 @@ def configure_forcings(
         Open boundaries to process (default: all four sides).
     product_name : str
         Name of the forcing data product (e.g. "GLORYS").
-    function_name : str
-        Access method on the product (e.g. "get_glorys_data_script_for_cli").
+    function_name : str, optional
+        Access method on the product. Defaults to "get_glorys_data_from_rda" on
+        Derecho (NCAR local archive) and "get_glorys_data_script_for_cli" elsewhere.
     tpxo_elevation_filepath : str, optional
         Path to TPXO elevation NetCDF — activates tidal forcing.
     tpxo_velocity_filepath : str, optional
@@ -206,6 +221,11 @@ def configure_forcings(
     global_river_nutrients_filepath : str, optional
         Path to global river nutrients NetCDF — activates BGC river nutrients.
     """
+    if function_name is None:
+        function_name = (
+            "get_glorys_data_from_rda" if _is_derecho() else "get_glorys_data_script_for_cli"
+        )
+
     case_dir_key = str(Path(case_dir))
     if case_dir_key not in _case_registry:
         raise RuntimeError(
@@ -250,6 +270,7 @@ def configure_forcings(
 
 def process_forcings(
     case_dir: str,
+    background: bool = False,
     process_initial_condition: bool = True,
     process_velocity_tracers: bool = True,
     process_bgc: bool = True,
@@ -265,10 +286,19 @@ def process_forcings(
     copied into {case_dir}/extract_forcings/. Fully stateless — does not
     require the Case object to be in memory.
 
+    This step can be slow (minutes to tens of minutes) because it downloads
+    and regrids ocean data. Use background=True to run it as a detached
+    subprocess; poll get_case_status to check progress.
+
     Parameters
     ----------
     case_dir : str
         Working directory (inputdir) for this case.
+    background : bool
+        If True, spawn processing as a detached background subprocess and
+        return immediately. Status is written to
+        extract_forcings/process_forcings_status.json; poll get_case_status
+        to track completion (default False).
     process_initial_condition : bool
         Whether to process the initial condition file (default True).
     process_velocity_tracers : bool
@@ -296,6 +326,39 @@ def process_forcings(
         raise FileNotFoundError(
             f"Config not found at {config_path}. Run configure_forcings first."
         )
+
+    if background:
+        worker = Path(__file__).parent / "_bg_worker.py"
+        extract_dir = case_dir_path / "extract_forcings"
+        log_file = extract_dir / "process_forcings.log"
+        status_file = extract_dir / "process_forcings_status.json"
+
+        cmd = [sys.executable, str(worker), str(case_dir_path)]
+        if not process_initial_condition:
+            cmd.append("--no-ic")
+        if not process_velocity_tracers:
+            cmd.append("--no-vt")
+        if not process_bgc:
+            cmd.append("--no-bgc")
+        if not process_tides:
+            cmd.append("--no-tides")
+        if not process_chl:
+            cmd.append("--no-chl")
+        if not process_runoff:
+            cmd.append("--no-runoff")
+        if not process_bgc_river_nutrients:
+            cmd.append("--no-bgc-river")
+
+        status_file.write_text(json.dumps({"status": "starting"}))
+        with open(log_file, "w") as log_f:
+            subprocess.Popen(cmd, stdout=log_f, stderr=log_f, start_new_session=True)
+
+        return {
+            "status": "running",
+            "log_file": str(log_file),
+            "status_file": str(status_file),
+            "hint": "Call get_case_status to track progress.",
+        }
 
     with open(config_path) as f:
         config = json.load(f)
