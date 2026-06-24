@@ -415,7 +415,56 @@ def process_forcings(
     return {"status": "ok", "processed": ran}
 
 
+def create_case_from_yaml(yaml_path: str, override: bool = False) -> dict:
+    """
+    Create a complete CrocoDash case from a YAML recipe file.
+
+    The YAML file describes the grid, bathymetry, vertical grid, CESM case
+    parameters, and forcings configuration in a single portable document.
+    This is the recommended entry point when you have a recipe from a
+    previous case (via `crocodash dump` or from a bundle's crocodash_case.yaml).
+
+    Equivalent to running `crocodash create --config <yaml_path>` on the CLI.
+    After this call, process_forcings must still be run to download and regrid
+    the boundary and initial conditions.
+
+    Parameters
+    ----------
+    yaml_path : str
+        Path to the YAML case config file. Required top-level sections:
+        grid, topo, vgrid, case (cesmroot, caseroot, inputdir, compset, machine),
+        forcings (date_range).
+    override : bool
+        If True, delete and recreate existing caseroot and inputdir.
+
+    Returns
+    -------
+    dict with keys:
+        status       — "ok"
+        caseroot     — path to the created CESM case
+        inputdir     — path to the input data directory
+        machine      — machine name used
+        compset      — compset used
+    """
+    from CrocoDash.recipe import load_config, create_case_from_yaml as _create
+
+    config = load_config(yaml_path)
+    case = _create(config, override=override)
+
+    # Cache the case object so configure_forcings can find it
+    _case_registry[str(Path(case.inputdir))] = case
+
+    return {
+        "status": "ok",
+        "caseroot": str(case.caseroot),
+        "inputdir": str(case.inputdir),
+        "machine": config["case"]["machine"],
+        "compset": config["case"]["compset"],
+    }
+
+
 def register(mcp):
     mcp.tool()(create_case)
+    mcp.tool()(create_case_from_yaml)
     mcp.tool()(configure_forcings)
     mcp.tool()(process_forcings)
