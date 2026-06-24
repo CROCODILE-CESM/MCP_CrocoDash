@@ -224,6 +224,8 @@ def configure_forcings(
     global_river_nutrients_filepath : str, optional
         Path to global river nutrients NetCDF — activates BGC river nutrients.
     """
+    case_dir_path = Path(case_dir)
+
     if function_name is None:
         function_name = (
             "get_glorys_data_from_rda"
@@ -231,7 +233,7 @@ def configure_forcings(
             else "get_glorys_data_script_for_cli"
         )
 
-    case_dir_key = str(Path(case_dir))
+    case_dir_key = str(case_dir_path)
     if case_dir_key not in _case_registry:
         raise RuntimeError(
             f"No active Case found for {case_dir!r}. "
