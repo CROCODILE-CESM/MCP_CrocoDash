@@ -172,8 +172,9 @@ def fork_case(
             bundle_path / "ocnice" / Path(config["vgrid"]["filename"]).name
         )
 
-    # Create the case from the patched recipe
-    case = create_case_from_yaml(config, override=True)
+    # Create the case from the patched recipe (configure_only=True: the recipe runs
+    # configure_forcings but not process_forcings, which the caller handles explicitly).
+    case = create_case_from_yaml(config, override=True, configure_only=True)
 
     # Copy all forcing and grid files from bundle/ocnice into the new inputdir
     bundle_ocnice = bundle_path / "ocnice"

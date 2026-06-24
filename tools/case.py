@@ -449,7 +449,10 @@ def create_case_from_yaml(yaml_path: str, override: bool = False) -> dict:
     from CrocoDash.recipe import load_config, create_case_from_yaml as _create
 
     config = load_config(yaml_path)
-    case = _create(config, override=override)
+    # configure_only=True: recipe handles configure_forcings but not process_forcings.
+    # The caller must invoke the MCP process_forcings tool separately — this keeps
+    # the download/regrid step explicit and allows background=True on slow machines.
+    case = _create(config, override=override, configure_only=True)
 
     # Cache the case object so configure_forcings can find it
     _case_registry[str(Path(case.inputdir))] = case
