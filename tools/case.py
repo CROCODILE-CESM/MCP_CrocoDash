@@ -1,18 +1,21 @@
 import json
 import importlib.util
 import os
-import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
 
-def _is_derecho() -> bool:
-    return (
-        os.environ.get("NCAR_HOST", "") == "derecho"
-        or "derecho" in socket.gethostname().lower()
-    )
+def _case_targets_derecho(case_dir: Path) -> bool:
+    """Return True if the case was created for the derecho machine, or if RDA GLORYS is accessible."""
+    params_path = case_dir / "mcp_case_params.json"
+    if params_path.exists():
+        params = json.loads(params_path.read_text())
+        if params.get("machine", "").lower() == "derecho":
+            return True
+    # Fallback: RDA path accessible (both Casper and Derecho mount /glade)
+    return Path("/glade/collections/rda/data").exists()
 
 from CrocoDash.grid import Grid
 from CrocoDash.topo import Topo
@@ -223,7 +226,9 @@ def configure_forcings(
     """
     if function_name is None:
         function_name = (
-            "get_glorys_data_from_rda" if _is_derecho() else "get_glorys_data_script_for_cli"
+            "get_glorys_data_from_rda"
+            if _case_targets_derecho(case_dir_path)
+            else "get_glorys_data_script_for_cli"
         )
 
     case_dir_key = str(Path(case_dir))
