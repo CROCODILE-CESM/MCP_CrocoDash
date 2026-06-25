@@ -40,14 +40,27 @@ def _load_grid_params(case_dir: Path) -> dict:
 
 
 def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGrid]:
-    grid = Grid(
-        lenx=params["lenx"],
-        leny=params["leny"],
-        resolution=params["resolution"],
-        xstart=params["lon_min"],
-        ystart=params["lat_min"],
-        name=params["grid_name"],
-    )
+    grid_type = params.get("grid_type", "latlon")
+
+    if grid_type == "polar":
+        grid = Grid.from_projection(
+            crs=params["projection"],
+            x_min=params["x_min"],
+            x_max=params["x_max"],
+            y_min=params["y_min"],
+            y_max=params["y_max"],
+            resolution_m=params["resolution_m"],
+            name=params["grid_name"],
+        )
+    else:
+        grid = Grid(
+            lenx=params["lenx"],
+            leny=params["leny"],
+            resolution=params["resolution"],
+            xstart=params["lon_min"],
+            ystart=params["lat_min"],
+            name=params["grid_name"],
+        )
 
     topo_library_dir = params.get("topo_library_dir", str(case_dir / "TopoLibrary"))
     domain_dir = get_domain_dir(grid, base_dir=topo_library_dir)

@@ -58,27 +58,26 @@ def bundle_case(
         recipe        — the crocodash_case.yaml contents (paths, compset, forcings)
         non_standard_info — what non-default CESM state was captured
     """
-    from CrocoDash.shareable import CaseBundle
+    from CrocoDash.shareable.bundle import BundleCrocoDashCase
 
-    cb = CaseBundle(case_dir)
+    cb = BundleCrocoDashCase(case_dir)
 
     # If caller didn't supply cesmroot/machine/project, read from saved state
     _cesmroot = cesmroot or str(cb.cesmroot)
     _machine = machine or cb.case_machine
     _project = project or cb.case_project or ""
 
-    cb.identify_non_standard_case_info(_cesmroot, _machine, _project)
+    cb.identify_non_standard_CrocoDash_case_information(_cesmroot, _machine, _project)
     bundle_path = cb.bundle(output_dir)
 
-    import yaml
-    with open(bundle_path / "crocodash_case.yaml") as f:
-        recipe = yaml.safe_load(f)
+    with open(bundle_path / "manifest.json") as f:
+        manifest = json.load(f)
     with open(bundle_path / "non_standard_case_info.json") as f:
         diffs = json.load(f)
 
     return {
         "bundle_path": str(bundle_path),
-        "recipe": recipe,
+        "manifest": manifest,
         "non_standard_info": diffs,
     }
 
