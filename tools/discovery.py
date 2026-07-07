@@ -1,11 +1,9 @@
-import CrocoDash.forcing_configurations.configurations  # trigger class registration
-from CrocoDash.raw_data_access.registry import ProductRegistry
-from CrocoDash.raw_data_access.datasets import load_all_datasets
-from CrocoDash.forcing_configurations.base import ForcingConfigRegistry
-
-
 def list_products() -> dict:
     """List all available data products (GLORYS, GEBCO, GloFAS, Seawifs, etc.) and their access methods."""
+    import CrocoDash.forcing_configurations.configurations  # trigger class registration
+    from CrocoDash.raw_data_access.registry import ProductRegistry
+    from CrocoDash.raw_data_access.datasets import load_all_datasets
+
     ProductRegistry.load()
     result = {}
     for name in ProductRegistry.list_products():
@@ -21,6 +19,9 @@ def list_products() -> dict:
 
 def list_forcing_configs() -> dict:
     """List available optional forcing configurators (tides, BGC, chlorophyll, runoff, etc.) and which compsets they apply to."""
+    import CrocoDash.forcing_configurations.configurations  # trigger class registration
+    from CrocoDash.forcing_configurations.base import ForcingConfigRegistry
+
     result = {}
     for cls in ForcingConfigRegistry.registered_types:
         user_args = ForcingConfigRegistry.get_user_args(cls)

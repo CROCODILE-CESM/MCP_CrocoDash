@@ -1,17 +1,16 @@
 import json
 from pathlib import Path
 
-import CrocoDash.forcing_configurations.configurations  # trigger class registration
-from CrocoDash.raw_data_access.registry import ProductRegistry
-from CrocoDash.raw_data_access.datasets import load_all_datasets
-from CrocoDash.forcing_configurations.base import ForcingConfigRegistry
-
 
 def register_resources(mcp):
 
     @mcp.resource("crocodash://products")
     def get_products() -> str:
         """Live list of registered products and their metadata."""
+        import CrocoDash.forcing_configurations.configurations  # trigger class registration
+        from CrocoDash.raw_data_access.registry import ProductRegistry
+        from CrocoDash.raw_data_access.datasets import load_all_datasets
+
         ProductRegistry.load()
         result = {}
         for name in ProductRegistry.list_products():
@@ -26,6 +25,9 @@ def register_resources(mcp):
     @mcp.resource("crocodash://forcing-configs")
     def get_forcing_configs() -> str:
         """Live list of available forcing configurators and their compset compatibility."""
+        import CrocoDash.forcing_configurations.configurations  # trigger class registration
+        from CrocoDash.forcing_configurations.base import ForcingConfigRegistry
+
         result = {}
         for cls in ForcingConfigRegistry.registered_types:
             user_args = ForcingConfigRegistry.get_user_args(cls)
