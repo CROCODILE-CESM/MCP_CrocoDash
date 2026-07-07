@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import importlib.util
 import os
@@ -17,11 +19,6 @@ def _case_targets_derecho(case_dir: Path) -> bool:
     # Fallback: RDA path accessible (both Casper and Derecho mount /glade)
     return Path("/glade/collections/rda/data").exists()
 
-from CrocoDash.grid import Grid
-from CrocoDash.topo import Topo
-from CrocoDash.vgrid import VGrid
-from CrocoDash.case import Case
-from mom6_forge.git_utils import get_domain_dir
 
 # In-memory cache: case_dir (str) → Case object.
 # This cache is valid for the lifetime of the server process.
@@ -40,6 +37,11 @@ def _load_grid_params(case_dir: Path) -> dict:
 
 
 def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGrid]:
+    from CrocoDash.grid import Grid
+    from CrocoDash.topo import Topo
+    from CrocoDash.vgrid import VGrid
+    from mom6_forge.git_utils import get_domain_dir
+
     grid_type = params.get("grid_type", "latlon")
 
     if grid_type == "polar":
@@ -133,6 +135,8 @@ def create_case(
     override : bool
         If True, delete and recreate existing caseroot and input directories.
     """
+    from CrocoDash.case import Case
+
     case_dir_path = Path(case_dir)
     params = _load_grid_params(case_dir_path)
     grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)

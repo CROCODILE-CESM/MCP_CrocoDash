@@ -2,10 +2,6 @@ import json
 from pathlib import Path
 from typing import Optional, Literal
 
-from CrocoDash.grid import Grid
-from CrocoDash.topo import Topo
-from CrocoDash.vgrid import VGrid
-
 POLAR_PROJECTIONS = {
     "EPSG:3995": "Arctic Polar Stereographic (WGS 84)",
     "EPSG:3031": "Antarctic Polar Stereographic (WGS 84)",
@@ -101,6 +97,10 @@ def create_grid(
     topo_file_path : str, optional
         Path to an existing MOM6 topog NetCDF file (for from_file).
     """
+    from CrocoDash.grid import Grid
+    from CrocoDash.topo import Topo
+    from CrocoDash.vgrid import VGrid
+
     case_dir_path = Path(case_dir)
     case_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -245,6 +245,10 @@ def create_polar_grid(
     topo_file_path : str, optional
         Path to an existing MOM6 topog NetCDF file (for from_file).
     """
+    from CrocoDash.grid import Grid
+    from CrocoDash.topo import Topo
+    from CrocoDash.vgrid import VGrid
+
     case_dir_path = Path(case_dir)
     case_dir_path.mkdir(parents=True, exist_ok=True)
 
