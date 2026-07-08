@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import importlib.util
 import os
@@ -7,6 +8,15 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+# CrocoDash/visualCaseGen print plain (ANSI-colored) status/error text straight to
+# stdout when run outside a Jupyter notebook (see visualCaseGen's DummyOutput). For
+# this MCP server, stdout is the JSON-RPC transport to the client — any stray print
+# corrupts the protocol stream and the client hangs forever waiting for a response
+# that can never be parsed. Redirect stdout to stderr around every call into those
+# libraries so nothing but FastMCP's own output ever reaches the real stdout.
+_redirect_library_stdout = lambda: contextlib.redirect_stdout(sys.stderr)
 
 
 def _case_targets_derecho(case_dir: Path) -> bool:
@@ -150,26 +160,28 @@ def create_case(
 
     case_dir_path = Path(case_dir)
     params = _load_grid_params(case_dir_path)
-    grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)
 
-    case = Case(
-        cesmroot=cesmroot,
-        caseroot=caseroot,
-        inputdir=str(case_dir_path),
-        compset=compset,
-        ocn_grid=grid,
-        ocn_topo=topo,
-        ocn_vgrid=vgrid,
-        atm_grid_name=atm_grid_name,
-        rof_grid_name=rof_grid_name,
-        ninst=ninst,
-        machine=machine,
-        project=project,
-        override=override,
-        ntasks_ocn=ntasks_ocn,
-        job_queue=job_queue,
-        job_wallclock_time=job_wallclock_time,
-    )
+    with _redirect_library_stdout():
+        grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)
+
+        case = Case(
+            cesmroot=cesmroot,
+            caseroot=caseroot,
+            inputdir=str(case_dir_path),
+            compset=compset,
+            ocn_grid=grid,
+            ocn_topo=topo,
+            ocn_vgrid=vgrid,
+            atm_grid_name=atm_grid_name,
+            rof_grid_name=rof_grid_name,
+            ninst=ninst,
+            machine=machine,
+            project=project,
+            override=override,
+            ntasks_ocn=ntasks_ocn,
+            job_queue=job_queue,
+            job_wallclock_time=job_wallclock_time,
+        )
 
     _case_registry[str(case_dir_path)] = case
 
@@ -285,13 +297,14 @@ def configure_forcings(
     if global_river_nutrients_filepath is not None:
         kwargs["global_river_nutrients_filepath"] = global_river_nutrients_filepath
 
-    case.configure_forcings(
-        date_range=date_range,
-        boundaries=boundaries,
-        product_name=product_name,
-        function_name=function_name,
-        **kwargs,
-    )
+    with _redirect_library_stdout():
+        case.configure_forcings(
+            date_range=date_range,
+            boundaries=boundaries,
+            product_name=product_name,
+            function_name=function_name,
+            **kwargs,
+        )
 
     return {
         "status": "ok",
@@ -402,40 +415,42 @@ def process_forcings(
     module_name = f"crocodash_driver_{case_dir_path.name}"
     spec = importlib.util.spec_from_file_location(module_name, driver_path)
     driver = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(driver)
 
     ran: list[str] = []
 
-    if process_initial_condition or process_velocity_tracers:
-        driver.run_workflow(
-            ic=process_initial_condition,
-            bc=process_velocity_tracers,
-        )
-        ran.append("conditions")
+    with _redirect_library_stdout():
+        spec.loader.exec_module(driver)
 
-    if "bgcironforcing" in config and process_bgc:
-        driver.process_bgcironforcing()
-        ran.append("bgc_iron_forcing")
+        if process_initial_condition or process_velocity_tracers:
+            driver.run_workflow(
+                ic=process_initial_condition,
+                bc=process_velocity_tracers,
+            )
+            ran.append("conditions")
 
-    if "bgcic" in config and process_bgc:
-        driver.process_bgcic()
-        ran.append("bgc_ic")
+        if "bgcironforcing" in config and process_bgc:
+            driver.process_bgcironforcing()
+            ran.append("bgc_iron_forcing")
 
-    if "tides" in config and process_tides:
-        driver.process_tides()
-        ran.append("tides")
+        if "bgcic" in config and process_bgc:
+            driver.process_bgcic()
+            ran.append("bgc_ic")
 
-    if "chl" in config and process_chl:
-        driver.process_chl()
-        ran.append("chl")
+        if "tides" in config and process_tides:
+            driver.process_tides()
+            ran.append("tides")
 
-    if "runoff" in config and process_runoff:
-        driver.process_runoff()
-        ran.append("runoff")
+        if "chl" in config and process_chl:
+            driver.process_chl()
+            ran.append("chl")
 
-    if "bgcrivernutrients" in config and process_bgc_river_nutrients:
-        driver.process_bgcrivernutrients()
-        ran.append("bgc_river_nutrients")
+        if "runoff" in config and process_runoff:
+            driver.process_runoff()
+            ran.append("runoff")
+
+        if "bgcrivernutrients" in config and process_bgc_river_nutrients:
+            driver.process_bgcrivernutrients()
+            ran.append("bgc_river_nutrients")
 
     return {"status": "ok", "processed": ran}
 
@@ -477,7 +492,8 @@ def create_case_from_yaml(yaml_path: str, override: bool = False) -> dict:
     # configure_only=True: recipe handles configure_forcings but not process_forcings.
     # The caller must invoke the MCP process_forcings tool separately — this keeps
     # the download/regrid step explicit and allows background=True on slow machines.
-    case = _create(config, override=override, configure_only=True)
+    with _redirect_library_stdout():
+        case = _create(config, override=override, configure_only=True)
 
     # Cache the case object so configure_forcings can find it
     _case_registry[str(Path(case.inputdir))] = case
