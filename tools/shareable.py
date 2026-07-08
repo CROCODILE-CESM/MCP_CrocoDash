@@ -250,7 +250,7 @@ def duplicate_case_tool(
     dict with keys:
         case_dir  — path to the new case
     """
-    from CrocoDash.shareable import duplicate_case
+    from CrocoDash.shareable.bundle import duplicate_case
 
     result = duplicate_case(
         caseroot=Path(case_dir).expanduser(),
