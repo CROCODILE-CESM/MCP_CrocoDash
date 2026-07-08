@@ -117,7 +117,7 @@ def create_grid(
     )
 
     topo_library_dir = str(case_dir_path / "TopoLibrary")
-    topo = Topo(grid=grid, min_depth=min_depth, version_control_dir=topo_library_dir)
+    topo = Topo(grid=grid, min_depth=min_depth, version_control_dir=topo_library_dir, git=True)
 
     if topo_type == "spoon":
         if topo_max_depth is None or topo_dedge is None:
@@ -263,7 +263,7 @@ def create_polar_grid(
     )
 
     topo_library_dir = str(case_dir_path / "TopoLibrary")
-    topo = Topo(grid=grid, min_depth=min_depth, version_control_dir=topo_library_dir)
+    topo = Topo(grid=grid, min_depth=min_depth, version_control_dir=topo_library_dir, git=True)
 
     if topo_type == "spoon":
         if topo_max_depth is None or topo_dedge is None:

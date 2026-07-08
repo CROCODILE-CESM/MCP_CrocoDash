@@ -48,12 +48,9 @@ def main() -> None:
         process_vt = not args.no_vt
 
         if process_ic or process_vt:
-            driver.process_conditions(
-                get_dataset_piecewise=True,
-                regrid_dataset_piecewise=True,
-                merge_piecewise_dataset=True,
-                run_initial_condition=process_ic,
-                run_boundary_conditions=process_vt,
+            driver.run_workflow(
+                ic=process_ic,
+                bc=process_vt,
             )
             ran.append("conditions")
 

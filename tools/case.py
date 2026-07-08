@@ -106,6 +106,17 @@ def create_case(
     create_grid) and calls Case.__init__(), which writes grid input files to {case_dir}
     and creates the CESM case directory at caseroot.
 
+    WARNING: never call this with a caseroot/case_dir pair that was already used by a
+    prior create_case call (including one that failed or errored partway) unless
+    override=True. CIME's create_newcase leaves EXEROOT/RUNDIR (on Derecho:
+    $SCRATCH/<casename>/{bld,run}) behind even when the attempt failed. If those
+    directories already exist, CIME prompts interactively ("(r)eplace, (a)bort, or
+    (u)se existing?") instead of erroring. That prompt reads from stdin, which for
+    this MCP server is the JSON-RPC transport pipe — not a terminal — so the prompt
+    can never be answered and the tool call hangs forever with no error or output.
+    Pick a fresh case_dir/caseroot name for each new attempt, or pass override=True
+    to reuse one (which deletes and recreates it cleanly first).
+
     Parameters
     ----------
     case_dir : str
@@ -396,12 +407,9 @@ def process_forcings(
     ran: list[str] = []
 
     if process_initial_condition or process_velocity_tracers:
-        driver.process_conditions(
-            get_dataset_piecewise=True,
-            regrid_dataset_piecewise=True,
-            merge_piecewise_dataset=True,
-            run_initial_condition=process_initial_condition,
-            run_boundary_conditions=process_velocity_tracers,
+        driver.run_workflow(
+            ic=process_initial_condition,
+            bc=process_velocity_tracers,
         )
         ran.append("conditions")
 
