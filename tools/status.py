@@ -35,10 +35,15 @@ def get_case_status(case_dir: str) -> dict:
     if grid_params_path.exists():
         status["steps"]["grid_created"] = True
         params = json.loads(grid_params_path.read_text())
-        status["grid"] = {
-            k: params[k]
-            for k in ["grid_name", "nx", "ny", "nk", "lon_min", "lon_max", "lat_min", "lat_max", "resolution"]
-        }
+        # Plain lat/lon grids (create_grid) and polar-projected grids
+        # (create_polar_grid) save different key sets -- only report keys
+        # actually present rather than assuming lat/lon ones exist.
+        grid_keys = [
+            "grid_name", "nx", "ny", "nk",
+            "lon_min", "lon_max", "lat_min", "lat_max", "resolution",
+            "projection", "x_min", "x_max", "y_min", "y_max", "resolution_m",
+        ]
+        status["grid"] = {k: params[k] for k in grid_keys if k in params}
 
     # Step 2: Case created?
     case_params_path = case_dir_path / "mcp_case_params.json"

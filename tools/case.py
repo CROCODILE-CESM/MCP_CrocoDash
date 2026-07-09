@@ -115,6 +115,24 @@ def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGri
     return grid, topo, vgrid
 
 
+def _collapse_pes(caseroot: str, ntasks: int) -> None:
+    """Set NTASKS/ROOTPE uniformly across every component and regenerate batch scripts.
+
+    Case.__init__'s ntasks_ocn only sets NTASKS_OCN -- every other component
+    (ATM, CPL, ICE, LND, ROF, GLC, WAV, ESP) is left at CIME's default of 128,
+    which blows past small queues' PE caps (e.g. Derecho's develop queue tops
+    out at jobmax=63) for a case that's meant to run on just ntasks_ocn cores.
+    Collapsing every component onto the same PE range is the right default for
+    a single-instance regional case, which never benefits from a mismatched
+    layout across components.
+    """
+    case = Path(caseroot)
+    subprocess.run(["./xmlchange", f"NTASKS={ntasks}"], cwd=case, check=True)
+    subprocess.run(["./xmlchange", "ROOTPE=0"], cwd=case, check=True)
+    subprocess.run(["./case.setup", "--clean"], cwd=case, check=True)
+    subprocess.run(["./case.setup"], cwd=case, check=True)
+
+
 def create_case(
     case_dir: str,
     cesmroot: str,
@@ -205,6 +223,9 @@ def create_case(
         )
 
     _case_registry[str(case_dir_path)] = case
+
+    if ntasks_ocn is not None:
+        _collapse_pes(caseroot, ntasks_ocn)
 
     # Re-save grid params — Case.__init__ with override=True wipes the inputdir.
     (case_dir_path / "mcp_grid_params.json").write_text(json.dumps(params, indent=2))
@@ -337,9 +358,82 @@ def configure_forcings(
     }
 
 
+def _submit_process_forcings_pbs(
+    case_dir_path: Path,
+    cmd: list[str],
+    pbs_queue: str,
+    pbs_walltime: str,
+    pbs_project: Optional[str],
+) -> dict:
+    """Submit the background worker as a real PBS job instead of a bare subprocess.
+
+    A bare subprocess.Popen (the background=True path) runs on this MCP
+    server's own host, typically a login node with a low memory ulimit --
+    large domains can get silently OOM-killed there. Submitting as a PBS job
+    runs the same worker on an actual compute node with real memory.
+    """
+    extract_dir = case_dir_path / "extract_forcings"
+    log_file = extract_dir / "process_forcings_pbs.log"
+    status_file = extract_dir / "process_forcings_status.json"
+    script_file = extract_dir / "process_forcings_pbs.sh"
+
+    if pbs_project is None:
+        case_params_path = case_dir_path / "mcp_case_params.json"
+        if case_params_path.exists():
+            pbs_project = json.loads(case_params_path.read_text()).get("project")
+    if pbs_project is None:
+        raise ValueError(
+            "pbs_project not given and no project found in mcp_case_params.json "
+            "-- pass pbs_project explicitly."
+        )
+
+    # sys.executable is .../<conda-env>/bin/python; ESMF's own mkfile lives at
+    # <conda-env>/lib/esmf.mk. A PBS job starts with a fresh environment, so
+    # this must be exported explicitly -- unlike the background=True subprocess
+    # path, which inherits the MCP server's already-active conda env.
+    esmfmkfile = Path(sys.executable).parent.parent / "lib" / "esmf.mk"
+
+    script = f"""#!/bin/bash
+#PBS -N process_forcings
+#PBS -A {pbs_project}
+#PBS -q {pbs_queue}
+#PBS -l select=1:ncpus=4:mem=64GB
+#PBS -l walltime={pbs_walltime}
+#PBS -j oe
+#PBS -o {log_file}
+
+set -euo pipefail
+export ESMFMKFILE={esmfmkfile}
+{" ".join(str(c) for c in cmd)}
+"""
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    script_file.write_text(script)
+    script_file.chmod(0o755)
+
+    status_file.write_text(json.dumps({"status": "starting"}))
+    result = subprocess.run(
+        ["qsub", str(script_file)], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        status_file.write_text(
+            json.dumps({"status": "failed", "error": result.stderr.strip()})
+        )
+        raise RuntimeError(f"qsub failed: {result.stderr.strip()}")
+
+    jobid = result.stdout.strip()
+    return {
+        "status": "queued",
+        "pbs_jobid": jobid,
+        "script_file": str(script_file),
+        "log_file": str(log_file),
+        "status_file": str(status_file),
+        "hint": "Call get_case_status to track progress once the job starts running.",
+    }
+
+
 def process_forcings(
     case_dir: str,
-    background: bool = False,
+    background: bool | str = False,
     process_initial_condition: bool = True,
     process_velocity_tracers: bool = True,
     process_bgc: bool = True,
@@ -347,6 +441,9 @@ def process_forcings(
     process_chl: bool = True,
     process_runoff: bool = True,
     process_bgc_river_nutrients: bool = True,
+    pbs_queue: str = "main",
+    pbs_walltime: str = "03:00:00",
+    pbs_project: Optional[str] = None,
 ) -> dict:
     """
     Process boundary conditions, initial conditions, and other forcings.
@@ -357,17 +454,24 @@ def process_forcings(
 
     This step can be slow (minutes to tens of minutes) because it downloads
     and regrids ocean data. Use background=True to run it as a detached
-    subprocess; poll get_case_status to check progress.
+    subprocess, or background="pbs" to submit it as a real PBS job on a
+    compute node instead (see below); poll get_case_status to check progress.
 
     Parameters
     ----------
     case_dir : str
         Working directory (inputdir) for this case.
-    background : bool
-        If True, spawn processing as a detached background subprocess and
-        return immediately. Status is written to
-        extract_forcings/process_forcings_status.json; poll get_case_status
-        to track completion (default False).
+    background : bool or "pbs"
+        If True, spawn processing as a detached background subprocess on
+        this MCP server's own host and return immediately. This host is
+        typically a login node with a low memory ulimit — large domains
+        (e.g. a pole-centered polar grid, whose GLORYS query can pull a
+        near-global longitude slice) can get silently OOM-killed there.
+        If "pbs", submit the same worker as a PBS job on a compute node
+        instead (recommended for anything but small domains) and return the
+        PBS job id. Status is written to
+        extract_forcings/process_forcings_status.json either way; poll
+        get_case_status to track completion (default False).
     process_initial_condition : bool
         Whether to process the initial condition file (default True).
     process_velocity_tracers : bool
@@ -382,6 +486,17 @@ def process_forcings(
         Whether to run runoff mapping if configured (default True).
     process_bgc_river_nutrients : bool
         Whether to run BGC river nutrients if configured (default True).
+    pbs_queue : str
+        Queue to submit to when background="pbs" (default "main" — this is
+        background data prep, not latency-sensitive, so it doesn't need a
+        fast/short dev queue).
+    pbs_walltime : str
+        Walltime for the PBS job when background="pbs", hh:mm:ss (default
+        "03:00:00").
+    pbs_project : str, optional
+        HPC project/account code for the PBS job when background="pbs".
+        Defaults to the project recorded in mcp_case_params.json by
+        create_case, if any.
     """
     case_dir_path = Path(case_dir)
     driver_path = case_dir_path / "extract_forcings" / "driver.py"
@@ -417,6 +532,11 @@ def process_forcings(
             cmd.append("--no-runoff")
         if not process_bgc_river_nutrients:
             cmd.append("--no-bgc-river")
+
+        if background == "pbs":
+            return _submit_process_forcings_pbs(
+                case_dir_path, cmd, pbs_queue, pbs_walltime, pbs_project
+            )
 
         status_file.write_text(json.dumps({"status": "starting"}))
         with open(log_file, "w") as log_f:
