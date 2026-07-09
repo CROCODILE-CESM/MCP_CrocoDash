@@ -50,7 +50,6 @@ def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGri
     from CrocoDash.grid import Grid
     from CrocoDash.topo import Topo
     from CrocoDash.vgrid import VGrid
-    from mom6_forge.git_utils import get_domain_dir
 
     grid_type = params.get("grid_type", "latlon")
 
@@ -74,9 +73,31 @@ def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGri
             name=params["grid_name"],
         )
 
+    # Rebuild Topo directly from the saved scalar params (topo_type/depth/etc.)
+    # rather than via Topo.from_version_control(TopoLibrary). TopoLibrary is not a
+    # reliable reconstruction source: CrocoDash's Case.__init__ with override=True
+    # (required whenever inputdir already exists, e.g. every create_case call after
+    # the first for a given case_dir) unconditionally shutil.rmtree()s the whole
+    # inputdir, including TopoLibrary, as a side effect — there is no re-population
+    # step for it (unlike mcp_grid_params.json, which the caller re-saves). Rebuilding
+    # from the scalar params is deterministic and doesn't depend on that directory
+    # surviving between calls.
     topo_library_dir = params.get("topo_library_dir", str(case_dir / "TopoLibrary"))
-    domain_dir = get_domain_dir(grid, base_dir=topo_library_dir)
-    topo = Topo.from_version_control(domain_dir)
+    topo = Topo(
+        grid=grid,
+        min_depth=params["min_depth"],
+        version_control_dir=topo_library_dir,
+        git=True,
+    )
+    topo_type = params["topo_type"]
+    if topo_type == "spoon":
+        topo.set_spoon(params["topo_max_depth"], params["topo_dedge"])
+    elif topo_type == "flat":
+        topo.set_flat(params["topo_flat_depth"])
+    elif topo_type == "from_file":
+        topo.set_depth_via_topog_file(params["topo_file_path"])
+    else:
+        raise ValueError(f"Unknown topo_type: {topo_type!r}")
 
     vgrid_type = params["vgrid_type"]
     if vgrid_type == "uniform":
