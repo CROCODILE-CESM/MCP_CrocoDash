@@ -115,6 +115,76 @@ def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGri
     return grid, topo, vgrid
 
 
+def _reconstruct_objects_from_master(master_dir: Path, grid_name: str) -> tuple[Grid, Topo, VGrid]:
+    """Reconstruct Grid/Topo/VGrid from an already-processed master case's own
+    on-disk netCDF files, for a case that reuses that master's forcings instead
+    of downloading/regridding its own (see reuse_forcings_from on create_case).
+    """
+    from CrocoDash.grid import Grid
+    from CrocoDash.topo import Topo
+    from CrocoDash.vgrid import VGrid
+    import xarray as xr
+
+    master_ocnice = master_dir / "ocnice"
+    if not master_ocnice.exists():
+        raise FileNotFoundError(
+            f"No ocnice/ directory found at {master_ocnice} -- reuse_forcings_from "
+            "must point at a case_dir that has already been through create_case."
+        )
+
+    def master_file(prefix: str) -> Path:
+        matches = sorted(master_ocnice.glob(f"{prefix}*.nc"))
+        if not matches:
+            raise FileNotFoundError(f"No {prefix}*.nc found in {master_ocnice}")
+        return matches[0]
+
+    hgrid_path = master_file("ocean_hgrid_")
+    topo_path = master_file("ocean_topog_")
+    vgrid_path = master_file("ocean_vgrid_")
+
+    grid = Grid.from_supergrid(str(hgrid_path), name=grid_name)
+
+    with xr.open_dataset(topo_path) as topo_ds:
+        min_depth = float(topo_ds.attrs.get("min_depth", 0.0))
+    topo = Topo.from_topo_file(grid, str(topo_path), min_depth=min_depth)
+
+    vgrid = VGrid.from_file(str(vgrid_path), name=grid_name)
+
+    return grid, topo, vgrid
+
+
+def _point_case_at_master(caseroot: str, master_dir: Path) -> None:
+    """Rewrite user_nl_mom to reference a master case's already-processed
+    grid/forcing files directly, instead of this case's own (freshly written
+    but never-processed) copies. Called by process_forcings when the case was
+    created with reuse_forcings_from, skipping the real download/regrid.
+    """
+    import re
+
+    master_ocnice = master_dir / "ocnice"
+
+    def master_file(prefix: str) -> str:
+        matches = sorted(master_ocnice.glob(f"{prefix}*.nc"))
+        if not matches:
+            raise FileNotFoundError(f"No {prefix}*.nc found in {master_ocnice}")
+        return matches[0].name
+
+    replacements = {
+        "INPUTDIR": str(master_ocnice),
+        "GRID_FILE": master_file("ocean_hgrid_"),
+        "TOPO_FILE": master_file("ocean_topog_"),
+        "ALE_COORDINATE_CONFIG": f"FILE:{master_file('ocean_vgrid_')}",
+    }
+
+    user_nl_mom = Path(caseroot) / "user_nl_mom"
+    lines = user_nl_mom.read_text().splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\w+)\s*=", line)
+        if m and m.group(1) in replacements:
+            lines[i] = f"{m.group(1)} = {replacements[m.group(1)]}"
+    user_nl_mom.write_text("\n".join(lines) + "\n")
+
+
 def _collapse_pes(caseroot: str, ntasks: int) -> None:
     """Set NTASKS/ROOTPE uniformly across every component and regenerate batch scripts.
 
@@ -147,6 +217,7 @@ def create_case(
     job_queue: Optional[str] = None,
     job_wallclock_time: Optional[str] = None,
     override: bool = False,
+    reuse_forcings_from: Optional[str] = None,
 ) -> dict:
     """
     Create a CESM case for a regional MOM6 experiment.
@@ -194,15 +265,37 @@ def create_case(
         Wall-clock time limit in hh:mm:ss format.
     override : bool
         If True, delete and recreate existing caseroot and input directories.
+    reuse_forcings_from : str, optional
+        Path to another case_dir that has already been through create_case
+        (ideally also process_forcings). When given, this case's Grid/Topo/
+        VGrid are reconstructed from that master's own on-disk netCDF files
+        instead of from this case_dir's own create_grid params (which need
+        not exist), and case_dir gets its own fresh grid/case directory as
+        usual. Follow up with configure_forcings and then process_forcings as
+        normal -- process_forcings will detect reuse_forcings_from and skip
+        the real download/regrid, instead repointing user_nl_mom at the
+        master's files. This is the standard pattern for an NTASKS scaling
+        sweep, where every point after the first should reuse one point's
+        already-processed forcings rather than re-downloading GLORYS.
     """
     from CrocoDash.case import Case
 
     case_dir_path = Path(case_dir)
-    params = _load_grid_params(case_dir_path)
+
+    if reuse_forcings_from is not None:
+        master_dir = Path(reuse_forcings_from)
+        params = _load_grid_params(master_dir)
+        params["grid_name"] = case_dir_path.name
+        with _redirect_library_stdout():
+            grid, topo, vgrid = _reconstruct_objects_from_master(
+                master_dir, case_dir_path.name
+            )
+    else:
+        params = _load_grid_params(case_dir_path)
+        with _redirect_library_stdout():
+            grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)
 
     with _redirect_library_stdout():
-        grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)
-
         case = Case(
             cesmroot=cesmroot,
             caseroot=caseroot,
@@ -244,6 +337,7 @@ def create_case(
         "job_queue": job_queue,
         "job_wallclock_time": job_wallclock_time,
         "override": override,
+        "reuse_forcings_from": reuse_forcings_from,
     }
     (case_dir_path / "mcp_case_params.json").write_text(json.dumps(case_params, indent=2))
 
@@ -457,6 +551,12 @@ def process_forcings(
     subprocess, or background="pbs" to submit it as a real PBS job on a
     compute node instead (see below); poll get_case_status to check progress.
 
+    If this case was created with create_case(reuse_forcings_from=...), this
+    call skips the real download/regrid entirely and just repoints
+    user_nl_mom at the master case's already-processed files -- the
+    background/PBS options above don't apply in that case since there's no
+    real work to run.
+
     Parameters
     ----------
     case_dir : str
@@ -499,6 +599,34 @@ def process_forcings(
         create_case, if any.
     """
     case_dir_path = Path(case_dir)
+
+    case_params_path = case_dir_path / "mcp_case_params.json"
+    reuse_forcings_from = None
+    if case_params_path.exists():
+        reuse_forcings_from = json.loads(case_params_path.read_text()).get(
+            "reuse_forcings_from"
+        )
+    if reuse_forcings_from is not None:
+        case_params = json.loads(case_params_path.read_text())
+        _point_case_at_master(case_params["caseroot"], Path(reuse_forcings_from))
+        status_file = case_dir_path / "extract_forcings" / "process_forcings_status.json"
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        status_file.write_text(
+            json.dumps(
+                {
+                    "status": "done",
+                    "processed": ["conditions"],
+                    "note": f"user_nl_mom repointed at {reuse_forcings_from}/ocnice, not reprocessed here",
+                },
+                indent=2,
+            )
+        )
+        return {
+            "status": "done",
+            "reused_from": reuse_forcings_from,
+            "note": "Forcings reused from master case; user_nl_mom repointed, nothing downloaded/regridded.",
+        }
+
     driver_path = case_dir_path / "extract_forcings" / "driver.py"
     config_path = case_dir_path / "extract_forcings" / "config.json"
 
