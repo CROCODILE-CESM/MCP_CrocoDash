@@ -1,9 +1,9 @@
 """
 Tools for bundling, forking, and duplicating CrocoDash cases.
 
-After PR #238 (cli-workflow) merges, the public API is:
-  - CrocoDash.shareable.CaseBundle    (was BundleCrocoDashCase)
-  - CrocoDash.shareable.ForkBundle    (was ForkCrocoDashBundle)
+Public API (PR #238, cli-workflow, merged):
+  - CrocoDash.shareable.CaseBundle
+  - CrocoDash.shareable.ForkBundle
   - CrocoDash.shareable.duplicate_case
   - CrocoDash.recipe.create_case_from_yaml / case_to_yaml
 
@@ -41,7 +41,7 @@ def bundle_case(
     Parameters
     ----------
     case_dir : str
-        Path to the existing CESM case root.
+        Path to the existing CESM case root (caseroot).
     output_dir : str
         Directory where the bundle folder will be written.
     cesmroot : str, optional
@@ -58,26 +58,27 @@ def bundle_case(
         recipe        — the crocodash_case.yaml contents (paths, compset, forcings)
         non_standard_info — what non-default CESM state was captured
     """
-    from CrocoDash.shareable.bundle import BundleCrocoDashCase
+    import yaml
+    from CrocoDash.shareable import CaseBundle
 
-    cb = BundleCrocoDashCase(case_dir)
+    cb = CaseBundle(case_dir)  # CaseBundle takes a caseroot, not an inputdir
 
     # If caller didn't supply cesmroot/machine/project, read from saved state
     _cesmroot = cesmroot or str(cb.cesmroot)
     _machine = machine or cb.case_machine
     _project = project or cb.case_project or ""
 
-    cb.identify_non_standard_CrocoDash_case_information(_cesmroot, _machine, _project)
+    cb.identify_non_standard_case_info(_cesmroot, _machine, _project)
     bundle_path = cb.bundle(output_dir)
 
-    with open(bundle_path / "manifest.json") as f:
-        manifest = json.load(f)
+    with open(bundle_path / "crocodash_case.yaml") as f:
+        recipe = yaml.safe_load(f)
     with open(bundle_path / "non_standard_case_info.json") as f:
         diffs = json.load(f)
 
     return {
         "bundle_path": str(bundle_path),
-        "manifest": manifest,
+        "recipe": recipe,
         "non_standard_info": diffs,
     }
 
@@ -237,7 +238,7 @@ def duplicate_case_tool(
     Parameters
     ----------
     case_dir : str
-        Path to the existing case to copy.
+        Path to the existing case to copy (caseroot).
     new_case_dir : str
         Destination path for the new case.
     new_inputdir : str
@@ -250,7 +251,7 @@ def duplicate_case_tool(
     dict with keys:
         case_dir  — path to the new case
     """
-    from CrocoDash.shareable.bundle import duplicate_case
+    from CrocoDash.shareable import duplicate_case
 
     result = duplicate_case(
         caseroot=Path(case_dir).expanduser(),

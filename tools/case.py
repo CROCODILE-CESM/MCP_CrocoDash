@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import json
-import importlib.util
-import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 
 # CrocoDash/visualCaseGen print plain (ANSI-colored) status/error text straight to
@@ -18,107 +16,62 @@ from typing import Optional
 # libraries so nothing but FastMCP's own output ever reaches the real stdout.
 _redirect_library_stdout = lambda: contextlib.redirect_stdout(sys.stderr)
 
+REUSE_MARKER_FILENAME = "crocodash_mcp_reuse.json"
 
-def _case_targets_derecho(case_dir: Path) -> bool:
+
+def _targets_derecho(machine: str) -> bool:
     """Return True if the case was created for the derecho machine, or if RDA GLORYS is accessible."""
-    params_path = case_dir / "mcp_case_params.json"
-    if params_path.exists():
-        params = json.loads(params_path.read_text())
-        if params.get("machine", "").lower() == "derecho":
-            return True
+    if machine.lower() == "derecho":
+        return True
     # Fallback: RDA path accessible (both Casper and Derecho mount /glade)
     return Path("/glade/collections/rda/data").exists()
 
 
-# In-memory cache: case_dir (str) → Case object.
-# This cache is valid for the lifetime of the server process.
-# If the server restarts between create_case and configure_forcings,
-# re-run create_case with override=True to rebuild.
-_case_registry: dict[str, Case] = {}
+def _caseroot_from_inputdir(inputdir: Path) -> str:
+    """Look up a case's caseroot from its inputdir.
 
-
-def _load_grid_params(case_dir: Path) -> dict:
-    params_path = case_dir / "mcp_grid_params.json"
-    if not params_path.exists():
+    crocodash_state.json (case_state.read/write) lives inside *caseroot*, not
+    inputdir, so it can't be found starting from inputdir alone. But
+    Case.configure_forcings() writes {"caseroot": str(self.caseroot), ...} as
+    the first thing into inputdir/extract_forcings/config.json -- that's the
+    one file, keyed by inputdir, that always points back at the caseroot.
+    """
+    config_path = inputdir / "extract_forcings" / "config.json"
+    if not config_path.exists():
         raise FileNotFoundError(
-            f"Grid params not found at {params_path}. Run create_grid first."
+            f"No config.json found at {config_path} -- can't resolve caseroot "
+            "for this inputdir. Run create_case/create_direct_case first."
         )
-    return json.loads(params_path.read_text())
+    with open(config_path) as f:
+        config = json.load(f)
+    caseroot = config.get("caseroot")
+    if caseroot is None:
+        raise RuntimeError(f"{config_path} has no 'caseroot' key.")
+    return caseroot
 
 
-def _reconstruct_objects(params: dict, case_dir: Path) -> tuple[Grid, Topo, VGrid]:
-    from CrocoDash.grid import Grid
-    from CrocoDash.topo import Topo
-    from CrocoDash.vgrid import VGrid
+def _collapse_pes(caseroot: str, ntasks: int) -> None:
+    """Set NTASKS/ROOTPE uniformly across every component and regenerate batch scripts.
 
-    grid_type = params.get("grid_type", "latlon")
-
-    if grid_type == "polar":
-        grid = Grid.from_projection(
-            crs=params["projection"],
-            x_min=params["x_min"],
-            x_max=params["x_max"],
-            y_min=params["y_min"],
-            y_max=params["y_max"],
-            resolution_m=params["resolution_m"],
-            name=params["grid_name"],
-        )
-    else:
-        grid = Grid(
-            lenx=params["lenx"],
-            leny=params["leny"],
-            resolution=params["resolution"],
-            xstart=params["lon_min"],
-            ystart=params["lat_min"],
-            name=params["grid_name"],
-        )
-
-    # Rebuild Topo directly from the saved scalar params (topo_type/depth/etc.)
-    # rather than via Topo.from_version_control(TopoLibrary). TopoLibrary is not a
-    # reliable reconstruction source: CrocoDash's Case.__init__ with override=True
-    # (required whenever inputdir already exists, e.g. every create_case call after
-    # the first for a given case_dir) unconditionally shutil.rmtree()s the whole
-    # inputdir, including TopoLibrary, as a side effect — there is no re-population
-    # step for it (unlike mcp_grid_params.json, which the caller re-saves). Rebuilding
-    # from the scalar params is deterministic and doesn't depend on that directory
-    # surviving between calls.
-    topo_library_dir = params.get("topo_library_dir", str(case_dir / "TopoLibrary"))
-    topo = Topo(
-        grid=grid,
-        min_depth=params["min_depth"],
-        version_control_dir=topo_library_dir,
-        git=True,
-    )
-    topo_type = params["topo_type"]
-    if topo_type == "spoon":
-        topo.set_spoon(params["topo_max_depth"], params["topo_dedge"])
-    elif topo_type == "flat":
-        topo.set_flat(params["topo_flat_depth"])
-    elif topo_type == "from_file":
-        topo.set_depth_via_topog_file(params["topo_file_path"])
-    else:
-        raise ValueError(f"Unknown topo_type: {topo_type!r}")
-
-    vgrid_type = params["vgrid_type"]
-    if vgrid_type == "uniform":
-        vgrid = VGrid.uniform(
-            nk=params["nk"], depth=params["depth"], name=params["grid_name"]
-        )
-    else:
-        vgrid = VGrid.hyperbolic(
-            nk=params["nk"],
-            depth=params["depth"],
-            ratio=params["ratio"],
-            name=params["grid_name"],
-        )
-
-    return grid, topo, vgrid
+    Case.__init__'s ntasks_ocn only sets NTASKS_OCN -- every other component
+    (ATM, CPL, ICE, LND, ROF, GLC, WAV, ESP) is left at CIME's default of 128,
+    which blows past small queues' PE caps (e.g. Derecho's develop queue tops
+    out at jobmax=63) for a case that's meant to run on just ntasks_ocn cores.
+    Collapsing every component onto the same PE range is the right default for
+    a single-instance regional case, which never benefits from a mismatched
+    layout across components. recipe.py/Case.__init__ don't do this themselves.
+    """
+    case = Path(caseroot)
+    subprocess.run(["./xmlchange", f"NTASKS={ntasks}"], cwd=case, check=True)
+    subprocess.run(["./xmlchange", "ROOTPE=0"], cwd=case, check=True)
+    subprocess.run(["./case.setup", "--clean"], cwd=case, check=True)
+    subprocess.run(["./case.setup"], cwd=case, check=True)
 
 
-def _reconstruct_objects_from_master(master_dir: Path, grid_name: str) -> tuple[Grid, Topo, VGrid]:
+def _reconstruct_objects_from_master(master_dir: Path, grid_name: str):
     """Reconstruct Grid/Topo/VGrid from an already-processed master case's own
     on-disk netCDF files, for a case that reuses that master's forcings instead
-    of downloading/regridding its own (see reuse_forcings_from on create_case).
+    of downloading/regridding its own (see reuse_forcings_from below).
     """
     from CrocoDash.grid import Grid
     from CrocoDash.topo import Topo
@@ -129,7 +82,8 @@ def _reconstruct_objects_from_master(master_dir: Path, grid_name: str) -> tuple[
     if not master_ocnice.exists():
         raise FileNotFoundError(
             f"No ocnice/ directory found at {master_ocnice} -- reuse_forcings_from "
-            "must point at a case_dir that has already been through create_case."
+            "must point at a case_dir that has already been through create_case/"
+            "create_direct_case."
         )
 
     def master_file(prefix: str) -> Path:
@@ -185,30 +139,118 @@ def _point_case_at_master(caseroot: str, master_dir: Path) -> None:
     user_nl_mom.write_text("\n".join(lines) + "\n")
 
 
-def _collapse_pes(caseroot: str, ntasks: int) -> None:
-    """Set NTASKS/ROOTPE uniformly across every component and regenerate batch scripts.
-
-    Case.__init__'s ntasks_ocn only sets NTASKS_OCN -- every other component
-    (ATM, CPL, ICE, LND, ROF, GLC, WAV, ESP) is left at CIME's default of 128,
-    which blows past small queues' PE caps (e.g. Derecho's develop queue tops
-    out at jobmax=63) for a case that's meant to run on just ntasks_ocn cores.
-    Collapsing every component onto the same PE range is the right default for
-    a single-instance regional case, which never benefits from a mismatched
-    layout across components.
+def create_case(config: dict, override: bool = False) -> dict:
     """
-    case = Path(caseroot)
-    subprocess.run(["./xmlchange", f"NTASKS={ntasks}"], cwd=case, check=True)
-    subprocess.run(["./xmlchange", "ROOTPE=0"], cwd=case, check=True)
-    subprocess.run(["./case.setup", "--clean"], cwd=case, check=True)
-    subprocess.run(["./case.setup"], cwd=case, check=True)
+    Create a complete CrocoDash case from a config dict, in one atomic call.
+
+    Equivalent to `crocodash create --config x.yaml`, but takes the config inline
+    instead of requiring a YAML file on disk. Builds Grid, Topo, and VGrid from the
+    `grid`/`topo`/`vgrid` sections, creates the CESM case, and calls
+    configure_forcings() from the `forcings` section -- all in this one call.
+    process_forcings must still be run separately afterward.
+
+    Only supports what CrocoDash.recipe.build_grid/build_topo/build_vgrid support:
+    grid via `supergrid_path` or plain lon/lat params (no polar/projection grids),
+    topo via flat/dataset/from_file (no spoon). For polar grids, spoon bathymetry,
+    or reusing another case's already-processed forcings, use create_direct_case
+    instead.
+
+    Parameters
+    ----------
+    config : dict
+        Same schema as the YAML file `crocodash create --config` takes. Required
+        top-level sections: grid, topo, vgrid, case (cesmroot, caseroot, inputdir,
+        compset, machine), forcings (date_range). See
+        docs/source/for_users/cli.md in the CrocoDash repo for the full schema.
+    override : bool
+        If True, delete and recreate existing caseroot and inputdir.
+
+    Returns
+    -------
+    dict with keys: status, caseroot, inputdir, machine, compset.
+    """
+    from CrocoDash.recipe import validate_config_structure, create_case_from_yaml
+
+    validate_config_structure(config)
+
+    if not config["forcings"].get("function_name"):
+        # Mirror configure_forcings' old auto-selection behavior: prefer the NCAR
+        # local archive on Derecho, fall back to the CLI-script variant elsewhere.
+        config = {**config, "forcings": dict(config["forcings"])}
+        config["forcings"]["function_name"] = (
+            "get_glorys_data_from_rda"
+            if _targets_derecho(config["case"]["machine"])
+            else "get_glorys_data_script_for_cli"
+        )
+
+    with _redirect_library_stdout():
+        # configure_only=True: this tool only configures forcings, it doesn't
+        # process them -- that's the separate process_forcings tool, which allows
+        # background=True on slow machines.
+        case = create_case_from_yaml(config, override=override, configure_only=True)
+
+    ntasks_ocn = config["case"].get("ntasks_ocn")
+    if ntasks_ocn is not None:
+        _collapse_pes(str(case.caseroot), ntasks_ocn)
+
+    return {
+        "status": "ok",
+        "caseroot": str(case.caseroot),
+        "inputdir": str(case.inputdir),
+        "machine": config["case"]["machine"],
+        "compset": config["case"]["compset"],
+    }
 
 
-def create_case(
+def create_case_from_yaml_file(yaml_path: str, override: bool = False) -> dict:
+    """
+    Create a complete CrocoDash case from a YAML recipe file on disk.
+
+    Thin wrapper around create_case for a YAML file instead of an inline dict --
+    e.g. a file produced by dump_case, or a bundle's crocodash_case.yaml. Exactly
+    equivalent to running `crocodash create --config <yaml_path>` on the CLI.
+
+    Parameters
+    ----------
+    yaml_path : str
+        Path to the YAML case config file.
+    override : bool
+        If True, delete and recreate existing caseroot and inputdir.
+    """
+    from CrocoDash.recipe import load_config
+
+    config = load_config(yaml_path)
+    return create_case(config, override=override)
+
+
+def dump_case(caseroot: str) -> dict:
+    """
+    Reconstruct a YAML-equivalent config dict from an existing case's state files.
+
+    Equivalent to `crocodash dump --caseroot <caseroot>`. Reads crocodash_state.json
+    (which lives inside caseroot, not inputdir -- unlike every other tool in this
+    module, this one is keyed by caseroot) and, if present,
+    extract_forcings/config.json. The returned dict can be edited and passed
+    straight back into create_case (e.g. to fork or duplicate a case by hand,
+    changing paths/machine/dates first).
+
+    Parameters
+    ----------
+    caseroot : str
+        Path to the existing CESM case root.
+    """
+    from CrocoDash.recipe import case_to_yaml
+
+    return case_to_yaml(caseroot)
+
+
+def create_direct_case(
     case_dir: str,
     cesmroot: str,
     caseroot: str,
     compset: str,
     machine: str,
+    date_range: list[str],
     project: Optional[str] = None,
     atm_grid_name: str = "TL319",
     rof_grid_name: Optional[str] = None,
@@ -217,85 +259,211 @@ def create_case(
     job_queue: Optional[str] = None,
     job_wallclock_time: Optional[str] = None,
     override: bool = False,
+    grid_type: Literal["latlon", "polar"] = "latlon",
+    lon_min: Optional[float] = None,
+    lon_max: Optional[float] = None,
+    lat_min: Optional[float] = None,
+    lat_max: Optional[float] = None,
+    resolution: Optional[float] = None,
+    projection: Optional[Literal["EPSG:3995", "EPSG:3031"]] = None,
+    x_min: Optional[float] = None,
+    x_max: Optional[float] = None,
+    y_min: Optional[float] = None,
+    y_max: Optional[float] = None,
+    resolution_m: Optional[float] = None,
+    grid_name: str = "grid",
+    min_depth: float = 0.0,
+    topo_type: Literal["spoon", "flat", "from_file"] = "flat",
+    topo_max_depth: Optional[float] = None,
+    topo_dedge: Optional[float] = None,
+    topo_flat_depth: Optional[float] = None,
+    topo_file_path: Optional[str] = None,
+    vgrid_type: Literal["uniform", "hyperbolic"] = "uniform",
+    nk: int = 10,
+    depth: Optional[float] = None,
+    ratio: Optional[float] = None,
+    boundaries: list[str] = ["south", "north", "west", "east"],
+    product_name: str = "GLORYS",
+    function_name: Optional[str] = None,
+    tpxo_elevation_filepath: Optional[str] = None,
+    tpxo_velocity_filepath: Optional[str] = None,
+    tidal_constituents: Optional[list[str]] = None,
+    chl_processed_filepath: Optional[str] = None,
+    marbl_ic_filepath: Optional[str] = None,
+    global_river_nutrients_filepath: Optional[str] = None,
     reuse_forcings_from: Optional[str] = None,
 ) -> dict:
     """
-    Create a CESM case for a regional MOM6 experiment.
+    Create a CrocoDash case by direct Grid/Topo/VGrid/Case construction, in one
+    atomic call. This is the escape hatch for cases create_case (the YAML/recipe
+    path) can't express:
 
-    Reads the grid configuration from {case_dir}/mcp_grid_params.json (written by
-    create_grid) and calls Case.__init__(), which writes grid input files to {case_dir}
-    and creates the CESM case directory at caseroot.
+      - polar grids (grid_type="polar"): CrocoDash.recipe doesn't support
+        projection-based grids. Uses Grid.from_projection() with a polar
+        stereographic CRS -- 'EPSG:3995' (Arctic) or 'EPSG:3031' (Antarctic).
+        Domain extents are in projected metres, not degrees.
+      - spoon bathymetry (topo_type="spoon"): CrocoDash.recipe's YAML schema only
+        supports flat/dataset/from_file; spoon is still on the Topo class itself.
+      - reuse_forcings_from: reconstruct Grid/Topo/VGrid from another case_dir
+        that has already been through create_case/create_direct_case (ideally
+        also process_forcings), instead of building a fresh grid here. Follow up
+        with process_forcings as normal -- it will detect reuse_forcings_from and
+        skip the real download/regrid, instead repointing user_nl_mom at the
+        master's files. This is the standard pattern for an NTASKS scaling sweep,
+        where every point after the first should reuse one point's
+        already-processed forcings rather than re-downloading GLORYS.
 
-    WARNING: never call this with a caseroot/case_dir pair that was already used by a
-    prior create_case call (including one that failed or errored partway) unless
-    override=True. CIME's create_newcase leaves EXEROOT/RUNDIR (on Derecho:
-    $SCRATCH/<casename>/{bld,run}) behind even when the attempt failed. If those
-    directories already exist, CIME prompts interactively ("(r)eplace, (a)bort, or
-    (u)se existing?") instead of erroring. That prompt reads from stdin, which for
-    this MCP server is the JSON-RPC transport pipe — not a terminal — so the prompt
-    can never be answered and the tool call hangs forever with no error or output.
-    Pick a fresh case_dir/caseroot name for each new attempt, or pass override=True
-    to reuse one (which deletes and recreates it cleanly first).
+    Builds Grid, Topo, VGrid, constructs Case(...), and calls
+    case.configure_forcings(...) all within this one call -- no state is kept in
+    the server process between calls. process_forcings must still be run
+    separately afterward.
 
     Parameters
     ----------
     case_dir : str
         Working directory for this case (the CrocoDash inputdir).
-    cesmroot : str
-        Path to the CESM source root directory.
-    caseroot : str
-        Path where the CESM case directory will be created.
-    compset : str
-        CESM compset alias (e.g. "G_JRA") or long name.
-    machine : str
-        CESM machine name (e.g. "derecho").
-    project : str, optional
-        HPC project/account code (required on most machines).
-    atm_grid_name : str
-        Atmosphere grid name (default "TL319").
-    rof_grid_name : str, optional
-        Runoff grid name; required when compset includes a runoff component.
-    ninst : int
-        Number of ensemble instances (default 1).
-    ntasks_ocn : int, optional
-        MPI tasks for the ocean component.
-    job_queue : str, optional
-        Scheduler queue name (e.g. "main", "regular").
-    job_wallclock_time : str, optional
-        Wall-clock time limit in hh:mm:ss format.
-    override : bool
-        If True, delete and recreate existing caseroot and input directories.
+    cesmroot, caseroot, compset, machine, project, atm_grid_name, rof_grid_name,
+    ninst, ntasks_ocn, job_queue, job_wallclock_time, override :
+        Same as the `case` section of create_case's config schema.
+    date_range, boundaries, product_name, function_name, tpxo_elevation_filepath,
+    tpxo_velocity_filepath, tidal_constituents, chl_processed_filepath,
+    marbl_ic_filepath, global_river_nutrients_filepath :
+        Same as the `forcings` section of create_case's config schema.
+    grid_type : "latlon" | "polar"
+        "latlon" uses lon_min/lon_max/lat_min/lat_max/resolution. "polar" uses
+        projection/x_min/x_max/y_min/y_max/resolution_m. Ignored (grid is instead
+        read from reuse_forcings_from's own files) when reuse_forcings_from is set.
+    grid_name : str
+        Short identifier for this grid (used in output file names).
+    min_depth : float
+        Minimum ocean depth in metres; shallower cells are masked.
+    topo_type : "spoon" | "flat" | "from_file"
+        Bathymetry initialisation method.
+    topo_max_depth, topo_dedge : float, optional
+        For topo_type="spoon": max depth and basin-edge depth (metres).
+    topo_flat_depth : float, optional
+        For topo_type="flat": uniform depth (metres).
+    topo_file_path : str, optional
+        For topo_type="from_file": path to an existing MOM6 topog NetCDF file.
+    vgrid_type : "uniform" | "hyperbolic"
+        Vertical grid spacing type.
+    nk : int
+        Number of vertical levels.
+    depth : float, optional
+        Total ocean depth in metres for the vertical grid. Defaults to the topo's
+        own max depth if omitted.
+    ratio : float, optional
+        For vgrid_type="hyperbolic": target ratio of top-to-bottom layer thickness.
     reuse_forcings_from : str, optional
-        Path to another case_dir that has already been through create_case
-        (ideally also process_forcings). When given, this case's Grid/Topo/
-        VGrid are reconstructed from that master's own on-disk netCDF files
-        instead of from this case_dir's own create_grid params (which need
-        not exist), and case_dir gets its own fresh grid/case directory as
-        usual. Follow up with configure_forcings and then process_forcings as
-        normal -- process_forcings will detect reuse_forcings_from and skip
-        the real download/regrid, instead repointing user_nl_mom at the
-        master's files. This is the standard pattern for an NTASKS scaling
-        sweep, where every point after the first should reuse one point's
-        already-processed forcings rather than re-downloading GLORYS.
+        Path to another case_dir whose Grid/Topo/VGrid and processed forcing files
+        should be reused instead of building/downloading fresh ones.
+
+    Returns
+    -------
+    dict with keys: status, caseroot, inputdir, machine, compset.
     """
     from CrocoDash.case import Case
+    from CrocoDash.grid import Grid
+    from CrocoDash.topo import Topo
+    from CrocoDash.vgrid import VGrid
 
     case_dir_path = Path(case_dir)
-
-    if reuse_forcings_from is not None:
-        master_dir = Path(reuse_forcings_from)
-        params = _load_grid_params(master_dir)
-        params["grid_name"] = case_dir_path.name
-        with _redirect_library_stdout():
-            grid, topo, vgrid = _reconstruct_objects_from_master(
-                master_dir, case_dir_path.name
-            )
-    else:
-        params = _load_grid_params(case_dir_path)
-        with _redirect_library_stdout():
-            grid, topo, vgrid = _reconstruct_objects(params, case_dir_path)
+    case_dir_path.mkdir(parents=True, exist_ok=True)
 
     with _redirect_library_stdout():
+        if reuse_forcings_from is not None:
+            master_dir = Path(reuse_forcings_from)
+            grid, topo, vgrid = _reconstruct_objects_from_master(
+                master_dir, grid_name
+            )
+        elif grid_type == "polar":
+            if None in (projection, x_min, x_max, y_min, y_max, resolution_m):
+                raise ValueError(
+                    "grid_type='polar' requires projection, x_min, x_max, y_min, "
+                    "y_max, and resolution_m."
+                )
+            grid = Grid.from_projection(
+                crs=projection,
+                x_min=x_min,
+                x_max=x_max,
+                y_min=y_min,
+                y_max=y_max,
+                resolution_m=resolution_m,
+                name=grid_name,
+            )
+            topo = Topo(grid=grid, min_depth=min_depth)
+            if topo_type == "spoon":
+                if topo_max_depth is None or topo_dedge is None:
+                    raise ValueError(
+                        "topo_max_depth and topo_dedge are required for topo_type='spoon'"
+                    )
+                topo.set_spoon(topo_max_depth, topo_dedge)
+            elif topo_type == "flat":
+                if topo_flat_depth is None:
+                    raise ValueError("topo_flat_depth is required for topo_type='flat'")
+                topo.set_flat(topo_flat_depth)
+            elif topo_type == "from_file":
+                if topo_file_path is None:
+                    raise ValueError("topo_file_path is required for topo_type='from_file'")
+                topo.set_depth_via_topog_file(topo_file_path)
+            else:
+                raise ValueError(f"Unknown topo_type: {topo_type!r}")
+
+            vgrid_depth = depth if depth is not None else topo.max_depth
+            if vgrid_type == "uniform":
+                vgrid = VGrid.uniform(nk=nk, depth=vgrid_depth, name=grid_name)
+            elif vgrid_type == "hyperbolic":
+                if ratio is None:
+                    raise ValueError("ratio is required for vgrid_type='hyperbolic'")
+                vgrid = VGrid.hyperbolic(
+                    nk=nk, depth=vgrid_depth, ratio=ratio, name=grid_name
+                )
+            else:
+                raise ValueError(f"Unknown vgrid_type: {vgrid_type!r}")
+        else:
+            if None in (lon_min, lon_max, lat_min, lat_max, resolution):
+                raise ValueError(
+                    "grid_type='latlon' requires lon_min, lon_max, lat_min, "
+                    "lat_max, and resolution."
+                )
+            grid = Grid(
+                lenx=lon_max - lon_min,
+                leny=lat_max - lat_min,
+                resolution=resolution,
+                xstart=lon_min,
+                ystart=lat_min,
+                name=grid_name,
+            )
+            topo = Topo(grid=grid, min_depth=min_depth)
+            if topo_type == "spoon":
+                if topo_max_depth is None or topo_dedge is None:
+                    raise ValueError(
+                        "topo_max_depth and topo_dedge are required for topo_type='spoon'"
+                    )
+                topo.set_spoon(topo_max_depth, topo_dedge)
+            elif topo_type == "flat":
+                if topo_flat_depth is None:
+                    raise ValueError("topo_flat_depth is required for topo_type='flat'")
+                topo.set_flat(topo_flat_depth)
+            elif topo_type == "from_file":
+                if topo_file_path is None:
+                    raise ValueError("topo_file_path is required for topo_type='from_file'")
+                topo.set_depth_via_topog_file(topo_file_path)
+            else:
+                raise ValueError(f"Unknown topo_type: {topo_type!r}")
+
+            vgrid_depth = depth if depth is not None else topo.max_depth
+            if vgrid_type == "uniform":
+                vgrid = VGrid.uniform(nk=nk, depth=vgrid_depth, name=grid_name)
+            elif vgrid_type == "hyperbolic":
+                if ratio is None:
+                    raise ValueError("ratio is required for vgrid_type='hyperbolic'")
+                vgrid = VGrid.hyperbolic(
+                    nk=nk, depth=vgrid_depth, ratio=ratio, name=grid_name
+                )
+            else:
+                raise ValueError(f"Unknown vgrid_type: {vgrid_type!r}")
+
         case = Case(
             cesmroot=cesmroot,
             caseroot=caseroot,
@@ -315,140 +483,49 @@ def create_case(
             job_wallclock_time=job_wallclock_time,
         )
 
-    _case_registry[str(case_dir_path)] = case
+        if function_name is None:
+            function_name = (
+                "get_glorys_data_from_rda"
+                if _targets_derecho(machine)
+                else "get_glorys_data_script_for_cli"
+            )
 
-    if ntasks_ocn is not None:
-        _collapse_pes(caseroot, ntasks_ocn)
+        forcing_kwargs: dict = {}
+        if tpxo_elevation_filepath is not None:
+            forcing_kwargs["tpxo_elevation_filepath"] = tpxo_elevation_filepath
+        if tpxo_velocity_filepath is not None:
+            forcing_kwargs["tpxo_velocity_filepath"] = tpxo_velocity_filepath
+        if tidal_constituents is not None:
+            forcing_kwargs["tidal_constituents"] = tidal_constituents
+        if chl_processed_filepath is not None:
+            forcing_kwargs["chl_processed_filepath"] = chl_processed_filepath
+        if marbl_ic_filepath is not None:
+            forcing_kwargs["marbl_ic_filepath"] = marbl_ic_filepath
+        if global_river_nutrients_filepath is not None:
+            forcing_kwargs["global_river_nutrients_filepath"] = global_river_nutrients_filepath
 
-    # Re-save grid params — Case.__init__ with override=True wipes the inputdir.
-    (case_dir_path / "mcp_grid_params.json").write_text(json.dumps(params, indent=2))
-
-    case_params = {
-        "cesmroot": cesmroot,
-        "caseroot": caseroot,
-        "inputdir": str(case_dir_path),
-        "compset": compset,
-        "machine": machine,
-        "project": project,
-        "atm_grid_name": atm_grid_name,
-        "rof_grid_name": rof_grid_name,
-        "ninst": ninst,
-        "ntasks_ocn": ntasks_ocn,
-        "job_queue": job_queue,
-        "job_wallclock_time": job_wallclock_time,
-        "override": override,
-        "reuse_forcings_from": reuse_forcings_from,
-    }
-    (case_dir_path / "mcp_case_params.json").write_text(json.dumps(case_params, indent=2))
-
-    return {
-        "status": "ok",
-        "caseroot": caseroot,
-        "inputdir": str(case_dir_path),
-        "compset": compset,
-        "machine": machine,
-    }
-
-
-def configure_forcings(
-    case_dir: str,
-    date_range: list[str],
-    boundaries: list[str] = ["south", "north", "west", "east"],
-    product_name: str = "GLORYS",
-    function_name: Optional[str] = None,
-    tpxo_elevation_filepath: Optional[str] = None,
-    tpxo_velocity_filepath: Optional[str] = None,
-    tidal_constituents: Optional[list[str]] = None,
-    chl_processed_filepath: Optional[str] = None,
-    marbl_ic_filepath: Optional[str] = None,
-    global_river_nutrients_filepath: Optional[str] = None,
-) -> dict:
-    """
-    Configure forcings for a regional MOM6 case.
-
-    Calls Case.configure_forcings(), which copies the extraction workflow into
-    {case_dir}/extract_forcings/ and writes config.json there. Optional forcing
-    configurators (tides, BGC, chlorophyll, runoff) are activated automatically
-    when their required arguments are supplied.
-
-    Requires create_case to have been called in the current server session.
-    If the server restarted since create_case ran, re-run create_case first.
-
-    Parameters
-    ----------
-    case_dir : str
-        Working directory (inputdir) for this case.
-    date_range : list of str
-        Two-element list of ISO dates: ["YYYY-MM-DD", "YYYY-MM-DD"].
-    boundaries : list of str
-        Open boundaries to process (default: all four sides).
-    product_name : str
-        Name of the forcing data product (e.g. "GLORYS").
-    function_name : str, optional
-        Access method on the product. Defaults to "get_glorys_data_from_rda" on
-        Derecho (NCAR local archive) and "get_glorys_data_script_for_cli" elsewhere.
-    tpxo_elevation_filepath : str, optional
-        Path to TPXO elevation NetCDF — activates tidal forcing.
-    tpxo_velocity_filepath : str, optional
-        Path to TPXO velocity NetCDF — activates tidal forcing.
-    tidal_constituents : list of str, optional
-        Tidal constituents to include (e.g. ["M2", "S2"]).
-    chl_processed_filepath : str, optional
-        Path to processed chlorophyll NetCDF — activates Chl configurator.
-    marbl_ic_filepath : str, optional
-        Path to MARBL initial conditions NetCDF — activates BGC IC configurator.
-    global_river_nutrients_filepath : str, optional
-        Path to global river nutrients NetCDF — activates BGC river nutrients.
-    """
-    case_dir_path = Path(case_dir)
-
-    if function_name is None:
-        function_name = (
-            "get_glorys_data_from_rda"
-            if _case_targets_derecho(case_dir_path)
-            else "get_glorys_data_script_for_cli"
-        )
-
-    case_dir_key = str(case_dir_path)
-    if case_dir_key not in _case_registry:
-        raise RuntimeError(
-            f"No active Case found for {case_dir!r}. "
-            "The MCP server may have restarted. Re-run create_case (with override=True) "
-            "to rebuild the in-memory Case object."
-        )
-
-    case = _case_registry[case_dir_key]
-
-    kwargs: dict = {}
-    if tpxo_elevation_filepath is not None:
-        kwargs["tpxo_elevation_filepath"] = tpxo_elevation_filepath
-    if tpxo_velocity_filepath is not None:
-        kwargs["tpxo_velocity_filepath"] = tpxo_velocity_filepath
-    if tidal_constituents is not None:
-        kwargs["tidal_constituents"] = tidal_constituents
-    if chl_processed_filepath is not None:
-        kwargs["chl_processed_filepath"] = chl_processed_filepath
-    if marbl_ic_filepath is not None:
-        kwargs["marbl_ic_filepath"] = marbl_ic_filepath
-    if global_river_nutrients_filepath is not None:
-        kwargs["global_river_nutrients_filepath"] = global_river_nutrients_filepath
-
-    with _redirect_library_stdout():
         case.configure_forcings(
             date_range=date_range,
             boundaries=boundaries,
             product_name=product_name,
             function_name=function_name,
-            **kwargs,
+            **forcing_kwargs,
+        )
+
+    if ntasks_ocn is not None:
+        _collapse_pes(caseroot, ntasks_ocn)
+
+    if reuse_forcings_from is not None:
+        (case_dir_path / REUSE_MARKER_FILENAME).write_text(
+            json.dumps({"reuse_forcings_from": str(reuse_forcings_from)}, indent=2)
         )
 
     return {
         "status": "ok",
-        "date_range": date_range,
-        "boundaries": boundaries,
-        "product_name": product_name,
-        "active_configurators": list(case.fcr.get_active_configurators()),
-        "config_written_to": str(Path(case_dir) / "extract_forcings" / "config.json"),
+        "caseroot": caseroot,
+        "inputdir": str(case_dir_path),
+        "machine": machine,
+        "compset": compset,
     }
 
 
@@ -466,18 +543,22 @@ def _submit_process_forcings_pbs(
     large domains can get silently OOM-killed there. Submitting as a PBS job
     runs the same worker on an actual compute node with real memory.
     """
+    from CrocoDash import case_state
+
     extract_dir = case_dir_path / "extract_forcings"
     log_file = extract_dir / "process_forcings_pbs.log"
     status_file = extract_dir / "process_forcings_status.json"
     script_file = extract_dir / "process_forcings_pbs.sh"
 
     if pbs_project is None:
-        case_params_path = case_dir_path / "mcp_case_params.json"
-        if case_params_path.exists():
-            pbs_project = json.loads(case_params_path.read_text()).get("project")
+        try:
+            caseroot = _caseroot_from_inputdir(case_dir_path)
+            pbs_project = case_state.read(caseroot).get("project")
+        except FileNotFoundError:
+            pbs_project = None
     if pbs_project is None:
         raise ValueError(
-            "pbs_project not given and no project found in mcp_case_params.json "
+            "pbs_project not given and no project found in crocodash_state.json "
             "-- pass pbs_project explicitly."
         )
 
@@ -542,16 +623,17 @@ def process_forcings(
     """
     Process boundary conditions, initial conditions, and other forcings.
 
-    Reads config.json written by configure_forcings and imports the driver
-    copied into {case_dir}/extract_forcings/. Fully stateless — does not
-    require the Case object to be in memory.
+    Fully stateless -- reads config.json written by create_case/create_direct_case's
+    configure_forcings() call and drives CrocoDash.extract_forcings.driver.run_workflow()
+    directly. Does not require any object to be held in memory by the server (unlike
+    Case.process_forcings(), which is a thin wrapper around the same call).
 
     This step can be slow (minutes to tens of minutes) because it downloads
     and regrids ocean data. Use background=True to run it as a detached
     subprocess, or background="pbs" to submit it as a real PBS job on a
     compute node instead (see below); poll get_case_status to check progress.
 
-    If this case was created with create_case(reuse_forcings_from=...), this
+    If this case was created with create_direct_case(reuse_forcings_from=...), this
     call skips the real download/regrid entirely and just repoints
     user_nl_mom at the master case's already-processed files -- the
     background/PBS options above don't apply in that case since there's no
@@ -595,20 +677,17 @@ def process_forcings(
         "03:00:00").
     pbs_project : str, optional
         HPC project/account code for the PBS job when background="pbs".
-        Defaults to the project recorded in mcp_case_params.json by
-        create_case, if any.
+        Defaults to the project recorded in crocodash_state.json, if any.
     """
     case_dir_path = Path(case_dir)
 
-    case_params_path = case_dir_path / "mcp_case_params.json"
-    reuse_forcings_from = None
-    if case_params_path.exists():
-        reuse_forcings_from = json.loads(case_params_path.read_text()).get(
+    reuse_marker_path = case_dir_path / REUSE_MARKER_FILENAME
+    if reuse_marker_path.exists():
+        reuse_forcings_from = json.loads(reuse_marker_path.read_text())[
             "reuse_forcings_from"
-        )
-    if reuse_forcings_from is not None:
-        case_params = json.loads(case_params_path.read_text())
-        _point_case_at_master(case_params["caseroot"], Path(reuse_forcings_from))
+        ]
+        caseroot = _caseroot_from_inputdir(case_dir_path)
+        _point_case_at_master(caseroot, Path(reuse_forcings_from))
         status_file = case_dir_path / "extract_forcings" / "process_forcings_status.json"
         status_file.parent.mkdir(parents=True, exist_ok=True)
         status_file.write_text(
@@ -627,16 +706,11 @@ def process_forcings(
             "note": "Forcings reused from master case; user_nl_mom repointed, nothing downloaded/regridded.",
         }
 
-    driver_path = case_dir_path / "extract_forcings" / "driver.py"
     config_path = case_dir_path / "extract_forcings" / "config.json"
-
-    if not driver_path.exists():
-        raise FileNotFoundError(
-            f"Driver not found at {driver_path}. Run configure_forcings first."
-        )
     if not config_path.exists():
         raise FileNotFoundError(
-            f"Config not found at {config_path}. Run configure_forcings first."
+            f"Config not found at {config_path}. Run create_case or "
+            "create_direct_case first."
         )
 
     if background:
@@ -680,104 +754,39 @@ def process_forcings(
     with open(config_path) as f:
         config = json.load(f)
 
-    # Import the driver using its own file path so CONFIG_PATH resolves correctly.
-    module_name = f"crocodash_driver_{case_dir_path.name}"
-    spec = importlib.util.spec_from_file_location(module_name, driver_path)
-    driver = importlib.util.module_from_spec(spec)
-
-    ran: list[str] = []
+    from CrocoDash.extract_forcings.driver import run_workflow
 
     with _redirect_library_stdout():
-        spec.loader.exec_module(driver)
+        run_workflow(
+            config_path=config_path,
+            ic=process_initial_condition,
+            bc=process_velocity_tracers,
+            bgcic="bgcic" in config and process_bgc,
+            bgcironforcing="bgcironforcing" in config and process_bgc,
+            tides="tides" in config and process_tides,
+            chl_="chl" in config and process_chl,
+            runoff="runoff" in config and process_runoff,
+            bgcrivernutrients="bgcrivernutrients" in config and process_bgc_river_nutrients,
+        )
 
-        if process_initial_condition or process_velocity_tracers:
-            driver.run_workflow(
-                ic=process_initial_condition,
-                bc=process_velocity_tracers,
-            )
-            ran.append("conditions")
-
-        if "bgcironforcing" in config and process_bgc:
-            driver.process_bgcironforcing()
-            ran.append("bgc_iron_forcing")
-
-        if "bgcic" in config and process_bgc:
-            driver.process_bgcic()
-            ran.append("bgc_ic")
-
-        if "tides" in config and process_tides:
-            driver.process_tides()
-            ran.append("tides")
-
-        if "chl" in config and process_chl:
-            driver.process_chl()
-            ran.append("chl")
-
-        if "runoff" in config and process_runoff:
-            driver.process_runoff()
-            ran.append("runoff")
-
-        if "bgcrivernutrients" in config and process_bgc_river_nutrients:
-            driver.process_bgcrivernutrients()
-            ran.append("bgc_river_nutrients")
+    ran = ["conditions"]
+    for key, flag in (
+        ("bgcironforcing", process_bgc),
+        ("bgcic", process_bgc),
+        ("tides", process_tides),
+        ("chl", process_chl),
+        ("runoff", process_runoff),
+        ("bgcrivernutrients", process_bgc_river_nutrients),
+    ):
+        if key in config and flag:
+            ran.append(key)
 
     return {"status": "ok", "processed": ran}
 
 
-def create_case_from_yaml(yaml_path: str, override: bool = False) -> dict:
-    """
-    Create a complete CrocoDash case from a YAML recipe file.
-
-    The YAML file describes the grid, bathymetry, vertical grid, CESM case
-    parameters, and forcings configuration in a single portable document.
-    This is the recommended entry point when you have a recipe from a
-    previous case (via `crocodash dump` or from a bundle's crocodash_case.yaml).
-
-    Equivalent to running `crocodash create --config <yaml_path>` on the CLI.
-    After this call, process_forcings must still be run to download and regrid
-    the boundary and initial conditions.
-
-    Parameters
-    ----------
-    yaml_path : str
-        Path to the YAML case config file. Required top-level sections:
-        grid, topo, vgrid, case (cesmroot, caseroot, inputdir, compset, machine),
-        forcings (date_range).
-    override : bool
-        If True, delete and recreate existing caseroot and inputdir.
-
-    Returns
-    -------
-    dict with keys:
-        status       — "ok"
-        caseroot     — path to the created CESM case
-        inputdir     — path to the input data directory
-        machine      — machine name used
-        compset      — compset used
-    """
-    from CrocoDash.recipe import load_config, create_case_from_yaml as _create
-
-    config = load_config(yaml_path)
-    # configure_only=True: recipe handles configure_forcings but not process_forcings.
-    # The caller must invoke the MCP process_forcings tool separately — this keeps
-    # the download/regrid step explicit and allows background=True on slow machines.
-    with _redirect_library_stdout():
-        case = _create(config, override=override, configure_only=True)
-
-    # Cache the case object so configure_forcings can find it
-    _case_registry[str(Path(case.inputdir))] = case
-
-    return {
-        "status": "ok",
-        "caseroot": str(case.caseroot),
-        "inputdir": str(case.inputdir),
-        "machine": config["case"]["machine"],
-        "compset": config["case"]["compset"],
-    }
-
-
 def register(mcp):
     mcp.tool()(create_case)
-    mcp.tool()(create_case_from_yaml)
-    mcp.tool()(configure_forcings)
+    mcp.tool()(create_case_from_yaml_file)
+    mcp.tool()(dump_case)
+    mcp.tool()(create_direct_case)
     mcp.tool()(process_forcings)

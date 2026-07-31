@@ -2,21 +2,23 @@
 
 ## Background
 
-CrocoDash is a Python toolkit for configuring and deploying regional MOM6 ocean models within CESM. A typical user workflow is:
+CrocoDash is a Python toolkit for configuring and deploying regional MOM6 ocean models within CESM. It ships a `crocodash` CLI built on a YAML-driven `recipe.py` layer:
 
-1. Define a grid (horizontal, topography, vertical)
-2. Create a CESM case
-3. Configure forcings (date range, data product, optional tides/BGC/etc.)
-4. Process forcings (download, regrid, generate boundary/IC files)
+```
+crocodash create   --config x.yaml       # grid + topo + vgrid + CESM case + configure_forcings, atomically
+crocodash process  --caseroot ...        # download/regrid boundary + initial condition files
+crocodash dump      --caseroot ...       # reconstruct the YAML for an existing case
+crocodash bundle/fork/duplicate          # share a case across machines/users (CrocoDash.shareable)
+```
 
-The MCP server exposes this workflow as a sequence of tools, making it drivable by an LLM agent.
+The MCP server exposes this workflow as a sequence of tools, making it drivable by an LLM agent, mapping directly onto the CLI verbs above.
 
 ---
 
 ## Philosophy
 
-- **One tool per workflow step** — tools map directly to `Case` methods and setup objects.
-- **Stateless server, file-backed state** — the server holds no in-memory state. Each tool takes a `case_dir` path and reads/writes the config JSON that CrocoDash already produces there. This makes the server restartable and crash-safe.
+- **One tool per CLI verb** — tools map directly onto `crocodash create/process/dump/bundle/fork/duplicate`.
+- **Stateless server, file-backed state** — the server holds no in-memory state. `create_case`/`create_direct_case` do grid+topo+vgrid+CESM-case+configure_forcings in one atomic call, so nothing needs to survive between tool calls (or a server restart) in memory. Each tool takes a `case_dir` (inputdir) or `caseroot` path and reads/writes the state CrocoDash itself already produces there (`crocodash_state.json` in caseroot, `extract_forcings/config.json` in inputdir).
 - **Discoverable** — resources expose available products and forcing configurations so an agent can reason about valid inputs before calling setup tools.
 
 ---
@@ -29,23 +31,32 @@ The MCP server exposes this workflow as a sequence of tools, making it drivable 
 |------|---------|
 | `list_products` | Returns available data products (GLORYS, GEBCO, GLOFAS, Seawifs, etc.) and their required inputs |
 | `list_forcing_configs` | Returns available optional forcing configurators (tides, BGC, chlorophyll, runoff, etc.) and which compsets they apply to |
-| `get_case_status` | Given a `case_dir`, returns step completion state: which files exist, what config JSON contains, which steps are done |
+| `get_case_status` | Given a `case_dir` (inputdir), returns step completion state: which files exist, what config JSON contains, which steps are done |
+| `dump_case` | Given a `caseroot`, reconstructs a YAML-equivalent config dict from the case's own state files (`crocodash_state.json`, `extract_forcings/config.json`) |
 
-### Case Setup Workflow (sequential)
+### Case Setup Workflow
 
 | Tool | Maps to | Key inputs |
 |------|---------|------------|
-| `create_grid` | Instantiate `Grid`, `Topo`, `VGrid` | lon/lat bounds, resolution, topo product, vertical grid params |
-| `create_case` | Instantiate `Case` + CIME case creation | CESM paths, grid objects, compset, machine, project, case dir |
-| `configure_forcings` | `Case.configure_forcings()` | date range, open boundaries, product name, optional config flags (tides, BGC, etc.) |
-| `process_forcings` | `Case.process_forcings()` | `case_dir` only — reads config JSON written by prior step |
+| `create_case` | `crocodash create --config x.yaml` (inline dict instead of a file) | grid/topo/vgrid/case/forcings config dict |
+| `create_case_from_yaml_file` | `crocodash create --config x.yaml` | path to a YAML file (e.g. from `dump_case` or a bundle) |
+| `create_direct_case` | Direct `Grid`/`Topo`/`VGrid`/`Case` construction | polar grids, spoon bathymetry, or `reuse_forcings_from` — everything `recipe.py`'s YAML schema doesn't support |
+| `process_forcings` | `crocodash process` / `CrocoDash.extract_forcings.driver.run_workflow` | `case_dir` (inputdir) only — reads `extract_forcings/config.json` |
+
+### Sharing (`crocodash bundle`/`fork`/`duplicate`)
+
+| Tool | Maps to | Key inputs |
+|------|---------|------------|
+| `bundle_case` | `crocodash bundle` / `CrocoDash.shareable.CaseBundle` | `caseroot`, output dir |
+| `fork_case` | `crocodash fork` (non-interactively) / `create_case_from_yaml` on a patched bundle recipe | bundle dir, new caseroot/inputdir, cesmroot/machine/project |
+| `duplicate_case_tool` | `crocodash duplicate` / `CrocoDash.shareable.duplicate_case` | source caseroot, new caseroot/inputdir |
 
 ### Utilities
 
 | Tool | Purpose |
 |------|---------|
 | `validate_domain` | Check that a lon/lat bounding box + resolution is valid before committing to grid creation |
-| `preview_config` | Return the configuration JSON that *would be* written, without executing anything |
+| `validate_case_config` | Wraps `CrocoDash.recipe.validate_config_structure` — fast structural check of a `create_case` config dict, without doing any real work |
 
 ---
 
@@ -54,8 +65,9 @@ The MCP server exposes this workflow as a sequence of tools, making it drivable 
 | URI | Content |
 |-----|---------|
 | `crocodash://products` | Live list of registered products and their metadata |
-| `crocodash://case/{case_dir}/config` | The case's current `config.json` |
-| `crocodash://case/{case_dir}/status` | Step completion status (grid files exist?, case built?, forcings processed?) |
+| `crocodash://forcing-configs` | Live list of available forcing configurators |
+| `crocodash://case/{case_dir}/config` | The case's current `extract_forcings/config.json` |
+| `crocodash://case/{case_dir}/status` | Step completion status (case created?, forcings configured?, forcings processed?) |
 
 ---
 
@@ -66,9 +78,11 @@ crocodash-mcp/
   server.py          # FastMCP app — tool + resource registration
   tools/
     discovery.py     # list_products, list_forcing_configs
-    grid.py          # create_grid, validate_domain
-    case.py          # create_case, configure_forcings, process_forcings
-    status.py        # get_case_status, preview_config
+    grid.py          # validate_domain
+    case.py          # create_case, create_case_from_yaml_file, create_direct_case, process_forcings, dump_case
+    status.py         # get_case_status, validate_case_config
+    shareable.py      # bundle_case, fork_case, duplicate_case_tool
+    _bg_worker.py     # background/PBS worker spawned by process_forcings(background=...)
   resources.py       # URI handlers for crocodash:// scheme
   pyproject.toml
   README.md
