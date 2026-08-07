@@ -13,6 +13,8 @@ crocodash bundle/fork/duplicate          # share a case across machines/users (C
 
 The MCP server exposes this workflow as a sequence of tools, making it drivable by an LLM agent, mapping directly onto the CLI verbs above.
 
+**Version tracking**: this server is not pip-pinned to CrocoDash (consumed via conda-env/sys.path, not a `pyproject.toml` dependency), so there's no lockfile to keep it in sync automatically. Last verified against CrocoDash `4b241745` (`v0.1.0-beta-129`) as of 2026-08-07 — in particular, the case inputdir layout (`ocean/`, `sea_ice/`, `wave/` subdirectories) and `process_forcings`' `cice`/`ww3` parameters. If CrocoDash changes its inputdir layout, `run_workflow`/`configure_forcings`/`process_forcings` signatures, or bundle format again, grep this repo for the affected symbol/path before merging that change upstream.
+
 ---
 
 ## Philosophy
@@ -85,7 +87,6 @@ crocodash-mcp/
     _bg_worker.py     # background/PBS worker spawned by process_forcings(background=...)
   resources.py       # URI handlers for crocodash:// scheme
   pyproject.toml
-  README.md
 ```
 
 ---

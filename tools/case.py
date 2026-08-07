@@ -78,18 +78,18 @@ def _reconstruct_objects_from_master(master_dir: Path, grid_name: str):
     from CrocoDash.vgrid import VGrid
     import xarray as xr
 
-    master_ocnice = master_dir / "ocnice"
-    if not master_ocnice.exists():
+    master_ocean = master_dir / "ocean"
+    if not master_ocean.exists():
         raise FileNotFoundError(
-            f"No ocnice/ directory found at {master_ocnice} -- reuse_forcings_from "
+            f"No ocean/ directory found at {master_ocean} -- reuse_forcings_from "
             "must point at a case_dir that has already been through create_case/"
             "create_direct_case."
         )
 
     def master_file(prefix: str) -> Path:
-        matches = sorted(master_ocnice.glob(f"{prefix}*.nc"))
+        matches = sorted(master_ocean.glob(f"{prefix}*.nc"))
         if not matches:
-            raise FileNotFoundError(f"No {prefix}*.nc found in {master_ocnice}")
+            raise FileNotFoundError(f"No {prefix}*.nc found in {master_ocean}")
         return matches[0]
 
     hgrid_path = master_file("ocean_hgrid_")
@@ -115,16 +115,16 @@ def _point_case_at_master(caseroot: str, master_dir: Path) -> None:
     """
     import re
 
-    master_ocnice = master_dir / "ocnice"
+    master_ocean = master_dir / "ocean"
 
     def master_file(prefix: str) -> str:
-        matches = sorted(master_ocnice.glob(f"{prefix}*.nc"))
+        matches = sorted(master_ocean.glob(f"{prefix}*.nc"))
         if not matches:
-            raise FileNotFoundError(f"No {prefix}*.nc found in {master_ocnice}")
+            raise FileNotFoundError(f"No {prefix}*.nc found in {master_ocean}")
         return matches[0].name
 
     replacements = {
-        "INPUTDIR": str(master_ocnice),
+        "INPUTDIR": str(master_ocean),
         "GRID_FILE": master_file("ocean_hgrid_"),
         "TOPO_FILE": master_file("ocean_topog_"),
         "ALE_COORDINATE_CONFIG": f"FILE:{master_file('ocean_vgrid_')}",
@@ -291,6 +291,15 @@ def create_direct_case(
     chl_processed_filepath: Optional[str] = None,
     marbl_ic_filepath: Optional[str] = None,
     global_river_nutrients_filepath: Optional[str] = None,
+    cice_product_name: Optional[str] = None,
+    cice_function_name: Optional[str] = None,
+    cice_function_args: Optional[dict] = None,
+    n_halo_cells: Optional[int] = None,
+    ww3_obc_product_name: Optional[str] = None,
+    ww3_obc_function_name: Optional[str] = None,
+    get_step_days: Optional[int] = None,
+    regrid_step_days: Optional[int] = None,
+    function_overrides: Optional[dict] = None,
     reuse_forcings_from: Optional[str] = None,
 ) -> dict:
     """
@@ -327,8 +336,17 @@ def create_direct_case(
         Same as the `case` section of create_case's config schema.
     date_range, boundaries, product_name, function_name, tpxo_elevation_filepath,
     tpxo_velocity_filepath, tidal_constituents, chl_processed_filepath,
-    marbl_ic_filepath, global_river_nutrients_filepath :
-        Same as the `forcings` section of create_case's config schema.
+    marbl_ic_filepath, global_river_nutrients_filepath, cice_product_name,
+    cice_function_name, cice_function_args, n_halo_cells, ww3_obc_product_name,
+    ww3_obc_function_name, get_step_days, regrid_step_days, function_overrides :
+        Same as the `forcings` section of create_case's config schema. The
+        cice_*/n_halo_cells and ww3_obc_*/get_step_days/regrid_step_days
+        parameters are only used when the case's compset requires CICE/WW3
+        respectively -- CICEConfigurator/WW3Configurator activate automatically
+        with sensible defaults otherwise, so these are safe to leave unset for
+        non-CICE/WW3 compsets. function_overrides lets a raw-data-access
+        function's own non-required default kwargs be overridden (e.g.
+        {"member": 3} to pick an ensemble member).
     grid_type : "latlon" | "polar"
         "latlon" uses lon_min/lon_max/lat_min/lat_max/resolution. "polar" uses
         projection/x_min/x_max/y_min/y_max/resolution_m. Ignored (grid is instead
@@ -503,6 +521,24 @@ def create_direct_case(
             forcing_kwargs["marbl_ic_filepath"] = marbl_ic_filepath
         if global_river_nutrients_filepath is not None:
             forcing_kwargs["global_river_nutrients_filepath"] = global_river_nutrients_filepath
+        if cice_product_name is not None:
+            forcing_kwargs["cice_product_name"] = cice_product_name
+        if cice_function_name is not None:
+            forcing_kwargs["cice_function_name"] = cice_function_name
+        if cice_function_args is not None:
+            forcing_kwargs["cice_function_args"] = cice_function_args
+        if n_halo_cells is not None:
+            forcing_kwargs["n_halo_cells"] = n_halo_cells
+        if ww3_obc_product_name is not None:
+            forcing_kwargs["ww3_obc_product_name"] = ww3_obc_product_name
+        if ww3_obc_function_name is not None:
+            forcing_kwargs["ww3_obc_function_name"] = ww3_obc_function_name
+        if get_step_days is not None:
+            forcing_kwargs["get_step_days"] = get_step_days
+        if regrid_step_days is not None:
+            forcing_kwargs["regrid_step_days"] = regrid_step_days
+        if function_overrides is not None:
+            forcing_kwargs["function_overrides"] = function_overrides
 
         case.configure_forcings(
             date_range=date_range,
@@ -616,6 +652,8 @@ def process_forcings(
     process_chl: bool = True,
     process_runoff: bool = True,
     process_bgc_river_nutrients: bool = True,
+    process_cice: bool = True,
+    process_ww3: bool = True,
     pbs_queue: str = "main",
     pbs_walltime: str = "03:00:00",
     pbs_project: Optional[str] = None,
@@ -668,6 +706,10 @@ def process_forcings(
         Whether to run runoff mapping if configured (default True).
     process_bgc_river_nutrients : bool
         Whether to run BGC river nutrients if configured (default True).
+    process_cice : bool
+        Whether to run CICE forcing generation if configured (default True).
+    process_ww3 : bool
+        Whether to run WW3 OBC spectra generation if configured (default True).
     pbs_queue : str
         Queue to submit to when background="pbs" (default "main" — this is
         background data prep, not latency-sensitive, so it doesn't need a
@@ -695,7 +737,7 @@ def process_forcings(
                 {
                     "status": "done",
                     "processed": ["conditions"],
-                    "note": f"user_nl_mom repointed at {reuse_forcings_from}/ocnice, not reprocessed here",
+                    "note": f"user_nl_mom repointed at {reuse_forcings_from}/ocean, not reprocessed here",
                 },
                 indent=2,
             )
@@ -734,6 +776,10 @@ def process_forcings(
             cmd.append("--no-runoff")
         if not process_bgc_river_nutrients:
             cmd.append("--no-bgc-river")
+        if not process_cice:
+            cmd.append("--no-cice")
+        if not process_ww3:
+            cmd.append("--no-ww3")
 
         if background == "pbs":
             return _submit_process_forcings_pbs(
@@ -767,6 +813,8 @@ def process_forcings(
             chl_="chl" in config and process_chl,
             runoff="runoff" in config and process_runoff,
             bgcrivernutrients="bgcrivernutrients" in config and process_bgc_river_nutrients,
+            cice="cice" in config and process_cice,
+            ww3="ww3" in config and process_ww3,
         )
 
     ran = ["conditions"]
@@ -777,6 +825,8 @@ def process_forcings(
         ("chl", process_chl),
         ("runoff", process_runoff),
         ("bgcrivernutrients", process_bgc_river_nutrients),
+        ("cice", process_cice),
+        ("ww3", process_ww3),
     ):
         if key in config and flag:
             ran.append(key)

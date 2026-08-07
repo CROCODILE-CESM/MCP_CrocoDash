@@ -9,7 +9,7 @@ Public API (PR #238, cli-workflow, merged):
 
 Typical forcing-variation workflow:
   1. bundle_case(original_case_dir, bundle_output_dir)
-       → portable snapshot: crocodash_case.yaml + ocnice/ + non_standard_case_info.json
+       → portable snapshot: crocodash_case.yaml + ocean/ + non_standard_case_info.json
   2. fork_case(bundle_dir, new_case_dir, new_inputdir, cesmroot, machine, project)
        → new case using recipe.py; run process_forcings to regenerate forcing files
   3. OR fork to container: bundle_case → run_case_in_container (cesm-runner MCP)
@@ -157,31 +157,31 @@ def fork_case(
     config["case"]["caseroot"] = str(Path(new_case_dir).expanduser())
     config["case"]["inputdir"] = str(Path(new_inputdir).expanduser())
 
-    # Redirect grid file paths from original host to bundle's ocnice folder
+    # Redirect grid file paths from original host to bundle's ocean folder
     if "supergrid_path" in config.get("grid", {}):
         config["grid"]["supergrid_path"] = str(
-            bundle_path / "ocnice" / Path(config["grid"]["supergrid_path"]).name
+            bundle_path / "ocean" / Path(config["grid"]["supergrid_path"]).name
         )
     topo_src = config.get("topo", {}).get("source", {})
     if topo_src.get("type") == "from_file":
         topo_src["topo_file_path"] = str(
-            bundle_path / "ocnice" / Path(topo_src["topo_file_path"]).name
+            bundle_path / "ocean" / Path(topo_src["topo_file_path"]).name
         )
     if config.get("vgrid", {}).get("type") == "from_file":
         config["vgrid"]["filename"] = str(
-            bundle_path / "ocnice" / Path(config["vgrid"]["filename"]).name
+            bundle_path / "ocean" / Path(config["vgrid"]["filename"]).name
         )
 
     # Create the case from the patched recipe (configure_only=True: the recipe runs
     # configure_forcings but not process_forcings, which the caller handles explicitly).
     case = create_case_from_yaml(config, override=True, configure_only=True)
 
-    # Copy all forcing and grid files from bundle/ocnice into the new inputdir
-    bundle_ocnice = bundle_path / "ocnice"
-    case_ocnice = Path(case.inputdir) / "ocnice"
-    case_ocnice.mkdir(parents=True, exist_ok=True)
-    for src in bundle_ocnice.iterdir():
-        dst = case_ocnice / src.name
+    # Copy all forcing and grid files from bundle/ocean into the new inputdir
+    bundle_ocean = bundle_path / "ocean"
+    case_ocean = Path(case.inputdir) / "ocean"
+    case_ocean.mkdir(parents=True, exist_ok=True)
+    for src in bundle_ocean.iterdir():
+        dst = case_ocean / src.name
         if not dst.exists():
             shutil.copy(src, dst)
 

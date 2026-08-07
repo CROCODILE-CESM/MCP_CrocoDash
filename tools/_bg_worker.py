@@ -23,6 +23,8 @@ def main() -> None:
     parser.add_argument("--no-chl", action="store_true")
     parser.add_argument("--no-runoff", action="store_true")
     parser.add_argument("--no-bgc-river", action="store_true")
+    parser.add_argument("--no-cice", action="store_true")
+    parser.add_argument("--no-ww3", action="store_true")
     args = parser.parse_args()
 
     case_dir_path = Path(args.case_dir)
@@ -44,6 +46,8 @@ def main() -> None:
         process_chl = not args.no_chl
         process_runoff = not args.no_runoff
         process_bgc_river = not args.no_bgc_river
+        process_cice = not args.no_cice
+        process_ww3 = not args.no_ww3
 
         run_workflow(
             config_path=config_path,
@@ -55,6 +59,8 @@ def main() -> None:
             chl_="chl" in config and process_chl,
             runoff="runoff" in config and process_runoff,
             bgcrivernutrients="bgcrivernutrients" in config and process_bgc_river,
+            cice="cice" in config and process_cice,
+            ww3="ww3" in config and process_ww3,
         )
 
         ran = ["conditions"]
@@ -65,6 +71,8 @@ def main() -> None:
             ("chl", process_chl),
             ("runoff", process_runoff),
             ("bgcrivernutrients", process_bgc_river),
+            ("cice", process_cice),
+            ("ww3", process_ww3),
         ):
             if key in config and flag:
                 ran.append(key)

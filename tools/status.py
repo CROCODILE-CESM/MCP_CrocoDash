@@ -75,15 +75,32 @@ def get_case_status(case_dir: str) -> dict:
                 if k in state
             }
 
-    # Step 3: Forcings processed? (output NetCDF files in ocnice/)
-    ocnice_dir = case_dir_path / "ocnice"
-    if ocnice_dir.exists():
-        nc_files = list(ocnice_dir.glob("*.nc"))
+    # Step 3: Forcings processed? (output NetCDF files in ocean/)
+    ocean_dir = case_dir_path / "ocean"
+    if ocean_dir.exists():
+        nc_files = list(ocean_dir.glob("*.nc"))
         ic_files = [f for f in nc_files if "init_" in f.name]
         obc_files = [f for f in nc_files if "forcing_obc_" in f.name]
         if ic_files or obc_files:
             status["steps"]["forcings_processed"] = True
             status["output_files"] = sorted(f.name for f in ic_files + obc_files)
+
+    # CICE/WW3 write to their own sibling directories (sea_ice/, wave/) rather
+    # than ocean/ -- check those too when the case's config activated them, so
+    # a CICE/WW3-active case isn't reported as unprocessed just because MOM6's
+    # ocean/ output alone was checked.
+    active_configurators = status.get("forcing", {}).get("active_configurators", [])
+    for subdir_name, config_key in (("sea_ice", "cice"), ("wave", "ww3")):
+        if config_key not in active_configurators:
+            continue
+        subdir = case_dir_path / subdir_name
+        if subdir.exists():
+            component_files = sorted(f.name for f in subdir.glob("*.nc"))
+            if component_files:
+                status["steps"]["forcings_processed"] = True
+                status.setdefault("output_files_by_component", {})[
+                    config_key
+                ] = component_files
 
     # reuse_forcings_from marker, if this case was created with create_direct_case(reuse_forcings_from=...)
     reuse_marker_path = case_dir_path / REUSE_MARKER_FILENAME
