@@ -16,4 +16,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tools"]
-include = ["resources.py", "server.py"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"server.py" = "server.py"
+"resources.py" = "resources.py"
