@@ -9,14 +9,15 @@ Public API (PR #238, cli-workflow, merged):
 
 Typical forcing-variation workflow:
   1. bundle_case(original_case_dir, bundle_output_dir)
-       → portable snapshot: crocodash_case.yaml + ocean/ + non_standard_case_info.json
+       → portable snapshot: crocodash_case.yaml + ocn/ (+ wav/) + non_standard_case_info.json
   2. fork_case(bundle_dir, new_case_dir, new_inputdir, cesmroot, machine, project)
        → new case using recipe.py; run process_forcings to regenerate forcing files
   3. OR fork to container: bundle_case → run_case_in_container (cesm-runner MCP)
 """
 
+import contextlib
 import json
-import shutil
+import sys
 from pathlib import Path
 
 
@@ -98,14 +99,17 @@ def fork_case(
     """
     Recreate a CrocoDash case from a bundle for a new machine or user.
 
-    Reads the recipe YAML from the bundle, patches it with the new location and
-    machine, then calls create_case_from_yaml to rebuild the case — bypassing
-    the interactive CLI prompts that ForkBundle.fork() uses for human users.
-    After creation, copies grid/forcing files from the bundle and applies any
-    non-standard CESM state (SourceMods, XML overrides, xmlchanges) per the plan.
+    Equivalent to `crocodash fork` with the copy plan given up front. Calls
+    CrocoDash.shareable.ForkBundle.fork() with its interactive YAML review
+    skipped (an MCP server has no terminal to prompt on): the bundle's recipe is
+    patched with the new paths/machine/project, the case is rebuilt via the
+    recipe (configure_forcings included), the bundle's ocn/ and wav/ files are
+    copied in, and the non-standard CESM state captured at bundle time is applied
+    per the copy_* flags.
 
-    To change forcings on the forked case (add tides, swap product, etc.), call
-    configure_forcings then process_forcings on the new case_dir afterward.
+    To change forcings on the forked case (add tides, swap product, etc.), dump it
+    with dump_case, edit, and recreate with create_case. Run process_forcings on
+    the new inputdir afterward.
 
     Parameters
     ----------
@@ -134,89 +138,37 @@ def fork_case(
     -------
     dict with keys:
         case_dir  — path to the new case
+        inputdir  — path to the new inputdir
         message   — next steps
     """
-    import yaml
-    from CrocoDash.recipe import create_case_from_yaml
-    from CrocoDash.shareable import (
-        copy_xml_files_from_case,
-        copy_source_mods_from_case,
-        apply_xmlchanges_to_case,
-        BundleDifferences,
-    )
+    from CrocoDash.shareable import ForkBundle
 
-    bundle_path = Path(bundle_dir).expanduser()
+    forker = ForkBundle(Path(bundle_dir).expanduser())
+    # fork() walks a human through the YAML before creating anything; the paths
+    # and machine are already given explicitly here, so accept the config as-is.
+    forker._guide_yaml_review = lambda config: config
 
-    # Read and patch the recipe YAML for the new environment
-    with open(bundle_path / "crocodash_case.yaml") as f:
-        config = yaml.safe_load(f)
-
-    config["case"]["cesmroot"] = str(Path(cesmroot).expanduser())
-    config["case"]["machine"] = machine
-    config["case"]["project"] = project
-    config["case"]["caseroot"] = str(Path(new_case_dir).expanduser())
-    config["case"]["inputdir"] = str(Path(new_inputdir).expanduser())
-
-    # Redirect grid file paths from original host to bundle's ocean folder
-    if "supergrid_path" in config.get("grid", {}):
-        config["grid"]["supergrid_path"] = str(
-            bundle_path / "ocean" / Path(config["grid"]["supergrid_path"]).name
+    with contextlib.redirect_stdout(sys.stderr):
+        case = forker.fork(
+            cesmroot=str(Path(cesmroot).expanduser()),
+            machine=machine,
+            project_number=project,
+            new_caseroot=str(Path(new_case_dir).expanduser()),
+            new_inputdir=str(Path(new_inputdir).expanduser()),
+            plan={
+                "xml_files": copy_xml_files,
+                "user_nl": copy_user_nl,
+                "source_mods": copy_source_mods,
+                "xmlchanges": copy_xmlchanges,
+            },
         )
-    topo_src = config.get("topo", {}).get("source", {})
-    if topo_src.get("type") == "from_file":
-        topo_src["topo_file_path"] = str(
-            bundle_path / "ocean" / Path(topo_src["topo_file_path"]).name
-        )
-    if config.get("vgrid", {}).get("type") == "from_file":
-        config["vgrid"]["filename"] = str(
-            bundle_path / "ocean" / Path(config["vgrid"]["filename"]).name
-        )
-
-    # Create the case from the patched recipe (configure_only=True: the recipe runs
-    # configure_forcings but not process_forcings, which the caller handles explicitly).
-    case = create_case_from_yaml(config, override=True, configure_only=True)
-
-    # Copy all forcing and grid files from bundle/ocean into the new inputdir
-    bundle_ocean = bundle_path / "ocean"
-    case_ocean = Path(case.inputdir) / "ocean"
-    case_ocean.mkdir(parents=True, exist_ok=True)
-    for src in bundle_ocean.iterdir():
-        dst = case_ocean / src.name
-        if not dst.exists():
-            shutil.copy(src, dst)
-
-    # Apply non-standard CESM state captured at bundle time
-    diffs = BundleDifferences(
-        **json.loads((bundle_path / "non_standard_case_info.json").read_text())
-    )
-
-    if copy_xml_files and diffs.xml_files_missing_in_new:
-        copy_xml_files_from_case(
-            bundle_path / "xml_files",
-            case.caseroot,
-            diffs.xml_files_missing_in_new,
-        )
-    if copy_source_mods and diffs.source_mods_missing_files:
-        copy_source_mods_from_case(
-            bundle_path,
-            case.caseroot,
-            diffs.source_mods_missing_files,
-        )
-    if copy_xmlchanges and diffs.xmlchanges_missing:
-        apply_xmlchanges_to_case(bundle_path, diffs.xmlchanges_missing)
-    if copy_user_nl and diffs.user_nl_missing_params:
-        # user_nl params are stored in non_standard_case_info; if the bundle
-        # includes user_nl_* files, copy them; otherwise skip silently.
-        from CrocoDash.shareable import copy_user_nl_params_from_case
-        user_nl_dir = bundle_path
-        if any((bundle_path / f"user_nl_{k}").exists() for k in diffs.user_nl_missing_params):
-            copy_user_nl_params_from_case(user_nl_dir, diffs.user_nl_missing_params)
 
     return {
         "case_dir": str(case.caseroot),
+        "inputdir": str(case.inputdir),
         "message": (
             "Case forked successfully. "
-            "Run process_forcings to regenerate any forcing files for the new domain."
+            "Run process_forcings on the new inputdir to regenerate forcing files."
         ),
     }
 

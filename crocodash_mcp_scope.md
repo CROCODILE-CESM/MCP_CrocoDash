@@ -13,7 +13,7 @@ crocodash bundle/fork/duplicate          # share a case across machines/users (C
 
 The MCP server exposes this workflow as a sequence of tools, making it drivable by an LLM agent, mapping directly onto the CLI verbs above.
 
-**Version tracking**: this server is not pip-pinned to CrocoDash (consumed via conda-env/sys.path, not a `pyproject.toml` dependency), so there's no lockfile to keep it in sync automatically. Last verified against CrocoDash `4b241745` (`v0.1.0-beta-129`) as of 2026-08-07 — in particular, the case inputdir layout (`ocean/`, `sea_ice/`, `wave/` subdirectories) and `process_forcings`' `cice`/`ww3` parameters. If CrocoDash changes its inputdir layout, `run_workflow`/`configure_forcings`/`process_forcings` signatures, or bundle format again, grep this repo for the affected symbol/path before merging that change upstream.
+**Version tracking**: this server is not pip-pinned to CrocoDash (consumed via conda-env/sys.path, not a `pyproject.toml` dependency), so there's no lockfile to keep it in sync automatically. Last verified against CrocoDash `507f2d6b` (`v1.0.1-2`) as of 2026-10-09 — in particular, the `CrocoDash.forcing` package (formerly `forcing_configurations` + `extract_forcings`), the case inputdir layout (`ocn/`, `ice/`, `wav/`; older `ocean/`, `sea_ice/`, `wave/` still read), the bundle layout (`ocn/`, `wav/`), and the registry-driven process flags (`ForcingConfigRegistry.available_process_flags`). If CrocoDash changes its inputdir layout, `run_workflow`/`configure_forcings`/`process_forcings` signatures, or bundle format again, grep this repo for the affected symbol/path before merging that change upstream.
 
 ---
 
@@ -32,7 +32,8 @@ The MCP server exposes this workflow as a sequence of tools, making it drivable 
 | Tool | Purpose |
 |------|---------|
 | `list_products` | Returns available data products (GLORYS, GEBCO, GLOFAS, Seawifs, etc.) and their required inputs |
-| `list_forcing_configs` | Returns available optional forcing configurators (tides, BGC, chlorophyll, runoff, etc.) and which compsets they apply to |
+| `list_forcing_configs` | Returns every forcing type (conditions, tides, BGC, chlorophyll, runoff, CICE, WW3, StreamYears, ...), which compsets they apply to, their `configure_forcings` kwargs, and their `process_forcings` flags |
+| `list_templates` | `crocodash template --list-notebooks` — CrocoGallery notebook IDs to start a case from |
 | `get_case_status` | Given a `case_dir` (inputdir), returns step completion state: which files exist, what config JSON contains, which steps are done |
 | `dump_case` | Given a `caseroot`, reconstructs a YAML-equivalent config dict from the case's own state files (`crocodash_state.json`, `extract_forcings/config.json`) |
 
@@ -42,15 +43,16 @@ The MCP server exposes this workflow as a sequence of tools, making it drivable 
 |------|---------|------------|
 | `create_case` | `crocodash create --config x.yaml` (inline dict instead of a file) | grid/topo/vgrid/case/forcings config dict |
 | `create_case_from_yaml_file` | `crocodash create --config x.yaml` | path to a YAML file (e.g. from `dump_case` or a bundle) |
-| `create_direct_case` | Direct `Grid`/`Topo`/`VGrid`/`Case` construction | polar grids, spoon bathymetry, or `reuse_forcings_from` — everything `recipe.py`'s YAML schema doesn't support |
-| `process_forcings` | `crocodash process` / `CrocoDash.extract_forcings.driver.run_workflow` | `case_dir` (inputdir) only — reads `extract_forcings/config.json` |
+| `create_direct_case` | Direct `Grid`/`Topo`/`VGrid`/`Case` construction | polar, rotated (`Grid.from_center`) or cut-from-global-supergrid grids, spoon/bowl bathymetry, or `reuse_forcings_from` — everything `recipe.py`'s YAML schema doesn't support; `forcing_kwargs` passes any `configure_forcings` kwarg through |
+| `process_forcings` | `crocodash process --all/--<flag>/--skip` / `CrocoDash.forcing.driver.run_workflow` | `case_dir` (inputdir), optional `components`/`skip`/`preview` — reads `extract_forcings/config.json` |
+| `write_template` | `crocodash template` | output path (.yaml/.ipynb/.py, or pbs), gallery notebook ID, machine |
 
 ### Sharing (`crocodash bundle`/`fork`/`duplicate`)
 
 | Tool | Maps to | Key inputs |
 |------|---------|------------|
 | `bundle_case` | `crocodash bundle` / `CrocoDash.shareable.CaseBundle` | `caseroot`, output dir |
-| `fork_case` | `crocodash fork` (non-interactively) / `create_case_from_yaml` on a patched bundle recipe | bundle dir, new caseroot/inputdir, cesmroot/machine/project |
+| `fork_case` | `crocodash fork` / `CrocoDash.shareable.ForkBundle.fork` with its interactive YAML review skipped | bundle dir, new caseroot/inputdir, cesmroot/machine/project |
 | `duplicate_case_tool` | `crocodash duplicate` / `CrocoDash.shareable.duplicate_case` | source caseroot, new caseroot/inputdir |
 
 ### Utilities
@@ -67,7 +69,7 @@ The MCP server exposes this workflow as a sequence of tools, making it drivable 
 | URI | Content |
 |-----|---------|
 | `crocodash://products` | Live list of registered products and their metadata |
-| `crocodash://forcing-configs` | Live list of available forcing configurators |
+| `crocodash://forcing-configs` | Live list of forcing types and their process flags |
 | `crocodash://case/{case_dir}/config` | The case's current `extract_forcings/config.json` |
 | `crocodash://case/{case_dir}/status` | Step completion status (case created?, forcings configured?, forcings processed?) |
 

@@ -1,35 +1,36 @@
 def list_products() -> dict:
     """List all available data products (GLORYS, GEBCO, GloFAS, Seawifs, etc.) and their access methods."""
-    import CrocoDash.forcing_configurations.configurations  # trigger class registration
+    import CrocoDash.forcing  # registers every forcing type (and the products they use)
     from CrocoDash.raw_data_access.registry import ProductRegistry
-    from CrocoDash.raw_data_access.datasets import load_all_datasets
 
     ProductRegistry.load()
     result = {}
     for name in ProductRegistry.list_products():
         product = ProductRegistry.get_product(name)
-        methods = ProductRegistry.list_access_methods(name)
         result[name] = {
             "description": getattr(product, "description", ""),
             "link": getattr(product, "link", ""),
-            "access_methods": methods,
+            "access_methods": ProductRegistry.list_access_methods(name),
         }
     return result
 
 
 def list_forcing_configs() -> dict:
-    """List available optional forcing configurators (tides, BGC, chlorophyll, runoff, etc.) and which compsets they apply to."""
-    import CrocoDash.forcing_configurations.configurations  # trigger class registration
-    from CrocoDash.forcing_configurations.base import ForcingConfigRegistry
+    """List every forcing type (conditions, tides, BGC, chlorophyll, runoff, CICE, WW3,
+    StreamYears, ...): which compsets require/allow it, the configure_forcings kwargs
+    it takes (user_args), and the process_forcings component flags it answers to
+    (process_flags; empty for types that do all their work at configure time)."""
+    import CrocoDash.forcing  # registers every forcing type
+    from CrocoDash.forcing.base import ForcingConfigRegistry
 
     result = {}
     for cls in ForcingConfigRegistry.registered_types:
-        user_args = ForcingConfigRegistry.get_user_args(cls)
         result[cls.name] = {
             "required_for_compsets": list(getattr(cls, "required_for_compsets", [])),
             "allowed_compsets": list(getattr(cls, "allowed_compsets", [])),
             "forbidden_compsets": list(getattr(cls, "forbidden_compsets", [])),
-            "user_args": user_args,
+            "user_args": ForcingConfigRegistry.get_user_args(cls),
+            "process_flags": sorted(getattr(cls, "process_components", {})),
         }
     return result
 

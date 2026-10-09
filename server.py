@@ -10,15 +10,15 @@ if _esmf_mk.exists():
 
 from fastmcp import FastMCP
 
-from tools import discovery, grid, case, status, shareable
+from tools import discovery, grid, case, status, shareable, template
 from resources import register_resources
 
 mcp = FastMCP(
     "CrocoDash",
     instructions=(
         "CrocoDash MCP server — configure and deploy regional MOM6 ocean models within CESM.\n\n"
-        "This server mirrors the `crocodash` CLI (create/dump/process/bundle/fork/duplicate) --\n"
-        "each MCP tool below maps onto one CLI verb. Case creation is now a single atomic call\n"
+        "This server mirrors the `crocodash` CLI (create/dump/process/bundle/fork/duplicate/\n"
+        "template) -- each MCP tool below maps onto one CLI verb. Case creation is a single atomic call\n"
         "(grid + topo + vgrid + CESM case + configure_forcings all happen inside create_case /\n"
         "create_direct_case) -- there is no separate configure_forcings step to call.\n\n"
         "== DEPLOYMENT PATHS ==\n\n"
@@ -49,9 +49,23 @@ mcp = FastMCP(
         "  - process_forcings can take minutes to tens of minutes (data download + regrid).\n"
         "    Pass background=True to detach, or background=\"pbs\" to submit a real PBS job on a\n"
         "    compute node (recommended for anything but small domains); poll get_case_status.\n"
-        "  - process_forcings runs CICE/WW3 forcing generation automatically when the case's\n"
-        "    compset requires it (process_cice/process_ww3 default True, auto-skipped if not\n"
-        "    configured for this case); set either to False to skip it explicitly.\n"
+        "  - process_forcings runs every component the case configured by default (the CLI's\n"
+        "    --all): ic, bc, plus tides/chl/runoff/bgc*/cice/ww3 when active. Pass\n"
+        "    components=[...] for a subset or skip=[...] to leave some out; dependencies are\n"
+        "    enabled automatically and run in order. preview=True shows the plan only.\n"
+        "    list_forcing_configs shows every forcing type's process_flags.\n"
+        "  - Forcing types activate from the compset: compsets with CICE get an ice\n"
+        "    restoring/IC file, WW3 compsets (regional CWR_*/GWR_* aliases) get boundary\n"
+        "    spectra, MARBL-BIO gets BGC inputs, and DATM%JRA gets StreamYears, which aligns\n"
+        "    DATM/DROF stream years to date_range automatically (no manual\n"
+        "    user_nl_datm_streams edits needed).\n"
+        "  - configure_forcings is safe to rerun on an existing case (it replaces its own\n"
+        "    user_nl blocks), so recreating with a changed forcings section is fine.\n"
+        "  - ntasks_ocn is optional: CrocoDash picks a PE layout from the number of active\n"
+        "    ocean points. Give ntasks_ocn only to force a layout (all components collapse\n"
+        "    onto it).\n"
+        "  - GLORYS on Derecho is fetched in parallel time chunks; already-fetched chunks\n"
+        "    are reused, so a rerun of process_forcings after a failure resumes.\n"
         "  - create_case auto-selects forcings.function_name='get_glorys_data_from_rda' when\n"
         "    case.machine='derecho' (NCAR local archive) and 'get_glorys_data_script_for_cli'\n"
         "    elsewhere, if function_name isn't given explicitly. With the script variant, run\n"
@@ -61,10 +75,14 @@ mcp = FastMCP(
         "    without override=True -- CIME's create_newcase can leave EXEROOT/RUNDIR behind and\n"
         "    then prompt interactively on a stdin that is this server's own JSON-RPC pipe, which\n"
         "    hangs forever with no error.\n"
-        "  - create_case (recipe/YAML path) only supports plain lat/lon grids and\n"
-        "    flat/dataset/from_file topography. For polar grids, spoon bathymetry, or reusing\n"
-        "    another case's already-processed forcings (NTASKS scaling sweeps), use\n"
-        "    create_direct_case instead.\n"
+        "  - create_case (recipe/YAML path) supports lat/lon grids (incl. cyclic_x=True\n"
+        "    zonal channels), supergrid files, and flat/dataset (e.g. GEBCO)/from_file\n"
+        "    topography. For polar, rotated (coast-aligned) or cut-from-global-supergrid\n"
+        "    grids, spoon/bowl bathymetry, or reusing another case's already-processed\n"
+        "    forcings (NTASKS scaling sweeps), use create_direct_case instead.\n"
+        "  - Starting from scratch? list_templates + write_template render a CrocoGallery\n"
+        "    demo (tides, BGC, CICE, WW3, ...) as a .yaml recipe with machine paths\n"
+        "    pre-filled (machine='glade'); edit it and pass it to create_case_from_yaml_file.\n"
         "  - fork_case and duplicate_case_tool call configure_forcings internally (via the\n"
         "    recipe). Only process_forcings needs to be called separately afterward.\n"
         "  - bundle_case reads machine/project/cesmroot from the case automatically — only\n"
@@ -90,7 +108,8 @@ mcp = FastMCP(
         "  Once created, a polar case can still be dumped/bundled/forked/duplicated via the\n"
         "  normal YAML/recipe path (its supergrid file round-trips regardless of how the grid\n"
         "  was originally built) -- only the initial creation needs create_direct_case.\n\n"
-        "Discovery tools: list_products, list_forcing_configs\n"
+        "Discovery tools: list_products, list_forcing_configs, list_templates\n"
+        "Templates: write_template\n"
         "Introspection: get_case_status, dump_case\n"
         "Validation: validate_domain, validate_case_config\n\n"
         "Resources:\n"
@@ -106,6 +125,7 @@ grid.register(mcp)
 case.register(mcp)
 status.register(mcp)
 shareable.register(mcp)
+template.register(mcp)
 register_resources(mcp)
 
 
