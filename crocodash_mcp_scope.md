@@ -78,16 +78,19 @@ The MCP server exposes this workflow as a sequence of tools, making it drivable 
 ## Repo Structure
 
 ```
-crocodash-mcp/
-  server.py          # FastMCP app — tool + resource registration
-  tools/
-    discovery.py     # list_products, list_forcing_configs
-    grid.py          # validate_domain
-    case.py          # create_case, create_case_from_yaml_file, create_direct_case, process_forcings, dump_case
-    status.py         # get_case_status, validate_case_config
-    shareable.py      # bundle_case, fork_case, duplicate_case_tool
-    _bg_worker.py     # background/PBS worker spawned by process_forcings(background=...)
-  resources.py       # URI handlers for crocodash:// scheme
+MCP_CrocoDash/
+  server.py            # launch shim for `python server.py` from a checkout
+  crocodash_mcp/       # uniquely named so it can share an env with the other CROCODILE MCP servers
+    server.py          # FastMCP app — tool + resource registration (console script: crocodash-mcp)
+    tools/
+      discovery.py     # list_products, list_forcing_configs
+      grid.py          # validate_domain
+      case.py          # create_case, create_case_from_yaml_file, create_direct_case, process_forcings, dump_case
+      status.py        # get_case_status, validate_case_config
+      shareable.py     # bundle_case, fork_case, duplicate_case_tool
+      template.py      # list_templates, write_template
+      _bg_worker.py    # background/PBS worker spawned by process_forcings(background=...)
+    resources.py       # URI handlers for crocodash:// scheme
   pyproject.toml
 ```
 
