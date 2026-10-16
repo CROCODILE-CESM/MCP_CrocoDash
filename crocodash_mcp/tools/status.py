@@ -45,11 +45,11 @@ def get_case_status(case_dir: str) -> dict:
             config = json.load(f)
         caseroot = config.get("caseroot")
         active = [k for k in config if k not in ("caseroot", "conditions")]
+        conditions = config.get("conditions", {})
+        # start/end dates are conditions *inputs* (formatted per outputs.date_format)
+        dates = {**conditions.get("outputs", {}), **conditions.get("inputs", {})}
         status["forcing"] = {
-            "date_range": [
-                config.get("conditions", {}).get("outputs", {}).get("start_date", ""),
-                config.get("conditions", {}).get("outputs", {}).get("end_date", ""),
-            ],
+            "date_range": [dates.get("start_date", ""), dates.get("end_date", "")],
             "boundaries": list(
                 config.get("conditions", {})
                 .get("outputs", {})
@@ -69,10 +69,14 @@ def get_case_status(case_dir: str) -> dict:
             state = None
         if state is not None:
             status["steps"]["case_created"] = True
+            # The state file never records caseroot itself (it lives inside it).
             status["case"] = {
-                k: state[k]
-                for k in ("caseroot", "compset_lname", "machine", "grid_name")
-                if k in state
+                "caseroot": caseroot,
+                **{
+                    k: state[k]
+                    for k in ("compset_lname", "machine", "grid_name")
+                    if k in state
+                },
             }
 
     # Step 3: Forcings processed? (output NetCDF files in ocn/, or ocean/ for

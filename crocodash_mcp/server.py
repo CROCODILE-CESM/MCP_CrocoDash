@@ -52,7 +52,8 @@ mcp = FastMCP(
         "  - process_forcings runs every component the case configured by default (the CLI's\n"
         "    --all): ic, bc, plus tides/chl/runoff/bgc*/cice/ww3 when active. Pass\n"
         "    components=[...] for a subset or skip=[...] to leave some out; dependencies are\n"
-        "    enabled automatically and run in order. preview=True shows the plan only.\n"
+        "    enabled automatically and run in order. preview=True is a dry run that\n"
+        "    reports which components would run.\n"
         "    list_forcing_configs shows every forcing type's process_flags.\n"
         "  - Forcing types activate from the compset: compsets with CICE get an ice\n"
         "    restoring/IC file, WW3 compsets (regional CWR_*/GWR_* aliases) get boundary\n"
@@ -67,9 +68,10 @@ mcp = FastMCP(
         "  - GLORYS on Derecho is fetched in parallel time chunks; already-fetched chunks\n"
         "    are reused, so a rerun of process_forcings after a failure resumes.\n"
         "  - create_case auto-selects forcings.function_name='get_glorys_data_from_rda' when\n"
-        "    case.machine='derecho' (NCAR local archive) and 'get_glorys_data_script_for_cli'\n"
-        "    elsewhere, if function_name isn't given explicitly. With the script variant, run\n"
-        "    the output script manually BEFORE process_forcings.\n"
+        "    case.machine='derecho' or the GLADE RDA archive is mounted (e.g. Casper), and\n"
+        "    'get_glorys_data_script_for_cli' elsewhere, if function_name isn't given\n"
+        "    explicitly. With the script variant, run the output script manually BEFORE\n"
+        "    process_forcings.\n"
         "  - create_case/create_direct_case with override=True delete and recreate an existing\n"
         "    caseroot/inputdir. Never reuse a case_dir/caseroot from a prior failed attempt\n"
         "    without override=True -- CIME's create_newcase can leave EXEROOT/RUNDIR behind and\n"
@@ -116,7 +118,8 @@ mcp = FastMCP(
         "  crocodash://products            — registered data products\n"
         "  crocodash://forcing-configs     — available optional configurators\n"
         "  crocodash://case/{case_dir}/config  — config.json for a case\n"
-        "  crocodash://case/{case_dir}/status  — step completion for a case"
+        "  crocodash://case/{case_dir}/status  — step completion for a case\n"
+        "  (case_dir is the absolute inputdir, e.g. crocodash://case//glade/.../input/mycase/status)"
     ),
 )
 

@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+from crocodash_mcp.tools.case import CASE_BUILD_LOCK
+
 
 def bundle_case(
     case_dir: str,
@@ -62,15 +64,17 @@ def bundle_case(
     import yaml
     from CrocoDash.shareable import CaseBundle
 
-    cb = CaseBundle(case_dir)  # CaseBundle takes a caseroot, not an inputdir
+    # identify_non_standard_case_info builds a temporary reference case.
+    with CASE_BUILD_LOCK:
+        cb = CaseBundle(case_dir)  # CaseBundle takes a caseroot, not an inputdir
 
-    # If caller didn't supply cesmroot/machine/project, read from saved state
-    _cesmroot = cesmroot or str(cb.cesmroot)
-    _machine = machine or cb.case_machine
-    _project = project or cb.case_project or ""
+        # If caller didn't supply cesmroot/machine/project, read from saved state
+        _cesmroot = cesmroot or str(cb.cesmroot)
+        _machine = machine or cb.case_machine
+        _project = project or cb.case_project or ""
 
-    cb.identify_non_standard_case_info(_cesmroot, _machine, _project)
-    bundle_path = cb.bundle(output_dir)
+        cb.identify_non_standard_case_info(_cesmroot, _machine, _project)
+        bundle_path = cb.bundle(output_dir)
 
     with open(bundle_path / "crocodash_case.yaml") as f:
         recipe = yaml.safe_load(f)
@@ -148,7 +152,7 @@ def fork_case(
     # and machine are already given explicitly here, so accept the config as-is.
     forker._guide_yaml_review = lambda config: config
 
-    with contextlib.redirect_stdout(sys.stderr):
+    with CASE_BUILD_LOCK, contextlib.redirect_stdout(sys.stderr):
         case = forker.fork(
             cesmroot=str(Path(cesmroot).expanduser()),
             machine=machine,
@@ -205,12 +209,13 @@ def duplicate_case_tool(
     """
     from CrocoDash.shareable import duplicate_case
 
-    result = duplicate_case(
-        caseroot=Path(case_dir).expanduser(),
-        new_caseroot=Path(new_case_dir).expanduser(),
-        new_inputdir=Path(new_inputdir).expanduser(),
-        bundle_dir=Path(bundle_dir).expanduser() if bundle_dir else None,
-    )
+    with CASE_BUILD_LOCK:
+        result = duplicate_case(
+            caseroot=Path(case_dir).expanduser(),
+            new_caseroot=Path(new_case_dir).expanduser(),
+            new_inputdir=Path(new_inputdir).expanduser(),
+            bundle_dir=Path(bundle_dir).expanduser() if bundle_dir else None,
+        )
     return {"case_dir": str(result.caseroot)}
 
 

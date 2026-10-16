@@ -1,6 +1,15 @@
 import json
 from pathlib import Path
 
+try:
+    from fastmcp.resources import ResourceSecurity
+
+    # fastmcp>=4 screens template params and rejects absolute paths by default,
+    # but case_dir *is* an absolute inputdir path.
+    _CASE_DIR_OPTS = {"security": ResourceSecurity(exempt_params={"case_dir"})}
+except ImportError:  # older fastmcp: no screening
+    _CASE_DIR_OPTS = {}
+
 
 def register_resources(mcp):
 
@@ -18,7 +27,8 @@ def register_resources(mcp):
 
         return json.dumps(list_forcing_configs(), indent=2)
 
-    @mcp.resource("crocodash://case/{case_dir}/config")
+    # {case_dir*} spans "/"-separated segments: crocodash://case//abs/inputdir/config
+    @mcp.resource("crocodash://case/{case_dir*}/config", **_CASE_DIR_OPTS)
     def get_case_config(case_dir: str) -> str:
         """The case's current config.json (written by configure_forcings)."""
         config_path = Path(case_dir) / "extract_forcings" / "config.json"
@@ -26,7 +36,7 @@ def register_resources(mcp):
             return json.dumps({"error": f"config.json not found at {config_path}"})
         return config_path.read_text()
 
-    @mcp.resource("crocodash://case/{case_dir}/status")
+    @mcp.resource("crocodash://case/{case_dir*}/status", **_CASE_DIR_OPTS)
     def get_case_status_resource(case_dir: str) -> str:
         """Step completion status: which files exist, what config contains, which steps are done."""
         from crocodash_mcp.tools.status import get_case_status

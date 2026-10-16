@@ -4,6 +4,7 @@ import contextlib
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -18,13 +19,23 @@ _redirect_library_stdout = lambda: contextlib.redirect_stdout(sys.stderr)
 
 REUSE_MARKER_FILENAME = "crocodash_mcp_reuse.json"
 
+# fastmcp>=4 runs sync tools in worker threads, so parallel tool calls really run
+# at once. Building a Case goes through visualCaseGen's process-global state
+# (ConfigVars, incl. CASEROOT), and two at once fail ("Attempted to re-define
+# ConfigVar instance ...") or write into each other -- build one at a time.
+CASE_BUILD_LOCK = threading.Lock()
+
+# The GLORYS archive CrocoDash's get_glorys_data_from_rda reads (see
+# CrocoDash/raw_data_access/datasets/glorys.py).
+RDA_GLORYS_PATH = Path("/glade/campaign/collections/rda/data/d010049")
+
 
 def _targets_derecho(machine: str) -> bool:
     """Return True if the case was created for the derecho machine, or if RDA GLORYS is accessible."""
     if machine.lower() == "derecho":
         return True
     # Fallback: RDA path accessible (both Casper and Derecho mount /glade)
-    return Path("/glade/collections/rda/data").exists()
+    return RDA_GLORYS_PATH.exists()
 
 
 def _ocn_dir(inputdir: Path) -> Path:
@@ -195,7 +206,7 @@ def create_case(config: dict, override: bool = False) -> dict:
             else "get_glorys_data_script_for_cli"
         )
 
-    with _redirect_library_stdout():
+    with CASE_BUILD_LOCK, _redirect_library_stdout():
         # configure_only=True: this tool only configures forcings, it doesn't
         # process them -- that's the separate process_forcings tool, which allows
         # background=True on slow machines.
@@ -479,10 +490,11 @@ def create_direct_case(
         Any other configure_forcings keyword, passed through as-is -- e.g.
         tpxo_elevation_filepath/tpxo_velocity_filepath/tidal_constituents (tides),
         chl_processed_filepath, marbl_ic_filepath, global_river_nutrients_filepath,
-        cice_product_name/cice_function_name/cice_function_args/n_halo_cells,
-        ww3_obc_product_name/ww3_obc_function_name/get_step_days/regrid_step_days,
+        cice_product_name/cice_function_name/cice_function_args/restore_ice,
+        ww3_obc_product_name/ww3_obc_function_name/ww3_obc_function_overrides/
+        get_step_days/regrid_step_days, rmax/fold/rof_esmf_mesh_filepath (Runoff),
         stream_year_padding/narrow_stream_files (StreamYears). See
-        list_forcing_configs for every forcing type's user_args.
+        list_forcing_configs for every forcing type's user_args/optional_args.
     grid_type : "latlon" | "polar" | "rotated" | "subgrid"
         See above. Ignored when reuse_forcings_from is set.
     lon_min, lon_max, lat_min, lat_max, resolution, cyclic_x :
@@ -531,7 +543,7 @@ def create_direct_case(
 
     case_dir_path = Path(case_dir)
 
-    with _redirect_library_stdout():
+    with CASE_BUILD_LOCK, _redirect_library_stdout():
         if reuse_forcings_from is not None:
             grid, topo, vgrid = _reconstruct_objects_from_master(
                 Path(reuse_forcings_from), grid_name
@@ -779,7 +791,8 @@ def process_forcings(
         Flags to leave out, e.g. ["runoff", "tides"] to reuse those from a
         previous run. Applied after `components`.
     preview : bool
-        Preview the task graph without downloading or regridding anything.
+        Dry run: dispatch every selected component without downloading or
+        regridding anything, and report which components would run.
     background : bool or "pbs"
         If True, spawn processing as a detached background subprocess on this MCP
         server's own host and return immediately. This host is typically a login
@@ -888,6 +901,14 @@ def process_forcings(
     with _redirect_library_stdout():
         timings = run_workflow(config_path=config_path, preview=preview, **flags)
 
+    if preview:
+        # run_workflow discards each component's preview plan, so all a preview
+        # can report is which components would run.
+        return {
+            "status": "preview",
+            "would_process": selected,
+            "ignored_not_in_config": ignored,
+        }
     return {
         "status": "ok",
         "processed": selected,
