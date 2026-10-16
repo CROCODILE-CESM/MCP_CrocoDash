@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -791,8 +792,9 @@ def process_forcings(
         Flags to leave out, e.g. ["runoff", "tides"] to reuse those from a
         previous run. Applied after `components`.
     preview : bool
-        Dry run: dispatch every selected component without downloading or
-        regridding anything, and report which components would run.
+        Dry run: download and regrid nothing. Returns which components would
+        run and, as `plan`, the driver's printed plan (with CrocoDash's driver
+        dry run: each step's output files, marked present or missing).
     background : bool or "pbs"
         If True, spawn processing as a detached background subprocess on this MCP
         server's own host and return immediately. This host is typically a login
@@ -898,17 +900,23 @@ def process_forcings(
 
     from CrocoDash.forcing.driver import run_workflow
 
-    with _redirect_library_stdout():
-        timings = run_workflow(config_path=config_path, preview=preview, **flags)
-
     if preview:
-        # run_workflow discards each component's preview plan, so all a preview
-        # can report is which components would run.
+        # The dry run prints its plan (each step's files, present/missing) rather
+        # than returning it, so capture stdout and hand the plan to the client.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_workflow(config_path=config_path, preview=True, **flags)
+        sys.stderr.write(buf.getvalue())
         return {
             "status": "preview",
             "would_process": selected,
             "ignored_not_in_config": ignored,
+            "plan": [line for line in buf.getvalue().splitlines() if line.strip()],
         }
+
+    with _redirect_library_stdout():
+        timings = run_workflow(config_path=config_path, preview=preview, **flags)
+
     return {
         "status": "ok",
         "processed": selected,
